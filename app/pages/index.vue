@@ -13,7 +13,7 @@ useSeoMeta({
     <section class="hero container" aria-labelledby="hero-title">
       <div class="hero-copy">
         <h1 id="hero-title">信息协会<br/>找到<span class="text-lime">同好<span
-            class="title-period"></span></span>，进步<span class="text-lime">学习</span></h1>
+            class="title-period"></span></span>，学习<span class="text-lime">进步</span></h1>
         <p class="hero-description">这里是信息通信技术协会。<br/>一群热爱技术的人，一个让想法发生的地方。<br
             class="desktop-only"/>本站仅由协会成员维护，欢迎加入我们。</p>
       </div>
