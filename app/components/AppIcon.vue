@@ -1,5 +1,5 @@
 <script setup lang="ts">
-withDefaults(defineProps<{ name: string; size?: number | string }>(), { size: 20 })
+withDefaults(defineProps<{ name: string; size?: number | string }>(), {size: 20})
 const paths: Record<string, string> = {
   arrow: 'M5 12h14m-6-6 6 6-6 6',
   diagonal: 'M6 18 18 6M6 6h12v12',
@@ -27,5 +27,8 @@ const paths: Record<string, string> = {
 </script>
 
 <template>
-  <svg :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="paths[name] || paths.arrow" /></svg>
+  <svg :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+       stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path :d="paths[name] || paths.arrow"/>
+  </svg>
 </template>
