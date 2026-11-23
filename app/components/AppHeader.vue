@@ -7,8 +7,8 @@ const searchDialog = ref<HTMLDialogElement>()
 const searchInput = ref<HTMLInputElement>()
 const query = ref('')
 const navigation = [
-  {label: '首页', to: '/'}, {label: '关于协会', to: '/about'},
-  {label: '探索方向', to: '/explore'}, {label: '协会动态', to: '/news'}
+  {label: '首页', to: '/'}, {label: '协会动态', to: '/news'},
+  {label: '探索方向', to: '/explore'}, {label: '关于协会', to: '/about'},
 ]
 const results = computed(() => {
   const term = query.value.trim().toLowerCase()
