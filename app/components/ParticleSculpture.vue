@@ -6,7 +6,7 @@ const ready = ref(false)
 const playing = ref(true)
 let dispose: (() => void) | undefined
 let cancelled = false
-const PARTICLE_COUNT = 18000 // 粒子总数，按表面积分摊到各 mesh
+const PARTICLE_COUNT = 38000 // 粒子总数，按表面积分摊到各 mesh
 
 onMounted(async () => {
   // three 及 GLTFLoader 均为按需动态加载：首屏不阻塞，WebGL/加载失败时静默降级到 SVG fallback
@@ -74,7 +74,7 @@ onMounted(async () => {
   meshes.forEach(mesh => bounds.expandByObject(mesh))
   const modelCenter = bounds.getCenter(new THREE.Vector3())
   const modelSize = bounds.getSize(new THREE.Vector3())
-  const modelScale = 3.6 / Math.max(modelSize.x, modelSize.y, modelSize.z, 1e-6)
+  const modelScale = 6 / Math.max(modelSize.x, modelSize.y, modelSize.z, 1e-6)
 
   // 贴图色是 sRGB 编码，采样后需转线性空间才能与材质色（本身是线性）统一进入着色器
   const srgbToLinear = (channel: number) => channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4
@@ -191,7 +191,7 @@ onMounted(async () => {
   const sampleNormal = new THREE.Vector3()
 
   // 面积加权重心坐标采样单个粒子，写入第 n 号粒子的位置/法线/颜色
-  // 返回 false 表示采到了全透明贴图像素，调用方会重试或用兜底色
+  // 返回 false 表示采到了全透明贴图像素或被视角筛选拒绝，调用方会重试或用兜底色
   function writeParticle(info: MeshInfo, n: number): boolean {
     let triangle = 0
     if (info.triCount > 1) {
@@ -230,6 +230,11 @@ onMounted(async () => {
     sampleNormal.copy(cornerA).multiplyScalar(bw).addScaledVector(cornerB, bu).addScaledVector(cornerC, bv)
     // 法线须用 normalMatrix（逆转置）变换，缩放不均匀时才不会失真
     sampleNormal.applyMatrix3(info.normalMatrix).normalize()
+    // 视角加权（接受-拒绝采样）：正对相机的面 |normal.z|≈1 全部接受，
+    // 掠射面（侧面/轮廓）按概率拒绝重采，抵消"斜面在屏幕上摊开/重叠"造成的
+    // 投影密度不均——小面板与弯曲大面在屏幕上的点密度因此趋于一致。
+    // +.12 下限保证轮廓边缘仍保留少量点勾边，|·| 让背面同样参与（相机两侧对称）
+    if (Math.random() > Math.min(1, Math.abs(sampleNormal.z) + .12)) return false
     normals.set([sampleNormal.x, sampleNormal.y, sampleNormal.z], n * 3)
 
     let red = 0
@@ -383,8 +388,8 @@ onMounted(async () => {
     const tiltY = reduced.matches ? 0 : pointer.x * .3
     sculpture.rotation.x += (tiltX - sculpture.rotation.x) * .035
     sculpture.rotation.y += (tiltY - sculpture.rotation.y) * .035
-    // 整体自转：绕 z 轴在 -35° ~ +35° 之间正弦往复循环
-    sculpture.rotation.z = reduced.matches ? 0 : Math.sin(elapsed * .45) * swing
+    // 整体自转：绕 y 轴在 -35° ~ +35° 之间正弦往复循环
+    sculpture.rotation.y = reduced.matches ? 0 : Math.sin(elapsed * .45) * swing
     renderer.render(scene, camera)
   }
   frame = requestAnimationFrame(render)
