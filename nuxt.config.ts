@@ -1,7 +1,7 @@
 export default defineNuxtConfig({
   compatibilityDate: '2026-11-17',
   devtools: { enabled: false },
-  css: ['~/assets/css/main.css'],
+  css: ['~/assets/css/main.css', '~/assets/css/admin.css'],
   app: {
     head: {
       htmlAttrs: { lang: 'zh-CN' },
