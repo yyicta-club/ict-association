@@ -1,8 +1,8 @@
-name: Deploy Node.js Frontend to GitHub Pages
+name: Deploy Nuxt to GitHub Pages
 
 on:
   push:
-    branches: ["master"] # 如果你的默认分支是 main，请改为 "main"
+    branches: ["master"]
   workflow_dispatch:
 
 permissions:
@@ -21,17 +21,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9 # 可替换为你本地使用的 pnpm 版本
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20 # 建议与本地开发环境保持一致
-          cache: "npm"
+          node-version: 20
+          cache: "pnpm"
 
       - name: Install dependencies
-        run: npm install # 按你的要求使用 install；CI 环境更推荐 npm ci
+        run: pnpm install --frozen-lockfile
 
-      - name: Build project
-        run: npm run build
+      - name: Generate static site
+        run: pnpm run generate
+        env:
+          NUXT_APP_BASE_URL: /ict-association/
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -39,7 +46,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./dist # 如果你的构建输出目录不是 dist，请修改
+          path: .output/public
 
   deploy:
     environment:
