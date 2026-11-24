@@ -4,7 +4,8 @@
     "dev": "bun run --hot src/index.ts"
   },
   "dependencies": {
-    "hono": "^4.13.16"
+    "hono": "^4.13.16",
+    "mysql2": "^3.24.6"
   },
   "devDependencies": {
     "@types/bun": "latest"
