@@ -1,13 +1,21 @@
 {
   "name": "backend",
+  "private": true,
+  "type": "module",
   "scripts": {
-    "dev": "bun run --hot src/index.ts"
+    "dev": "bun run --hot src/index.ts",
+    "start": "bun run src/index.ts",
+    "db:init": "bun run scripts/init-db.ts",
+    "seed:admin": "bun run scripts/seed-admin.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "hono": "^4.13.16",
     "mysql2": "^3.24.6"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
   }
 }
