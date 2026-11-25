@@ -7,11 +7,15 @@ import { adminAuth } from '../../middlewares/auth'
 import type { HonoEnv } from '../../types'
 import { success } from '../../utils/response'
 import { adminAuthRoutes } from './auth'
+import { adminUserRoutes } from './user'
 
 export const adminRoutes = new Hono<HonoEnv>()
 
 // POST /admin/login
 adminRoutes.route('/', adminAuthRoutes)
+
+// 管理员账户管理
+adminRoutes.route('/user', adminUserRoutes)
 
 // 受保护接口示例：校验 token 是否有效
 adminRoutes.get('/me', adminAuth, (c) => {

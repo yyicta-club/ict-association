@@ -1,9 +1,18 @@
 import { describe, expect, test } from 'bun:test'
 import { sign } from 'hono/jwt'
+import { buildAdminUpdatePlan } from '../src/services/admin-user.service'
 import { parseExpiresIn, signAdminToken, verifyAdminToken } from '../src/utils/jwt'
 import { dummyVerify, hashPassword, verifyPassword } from '../src/utils/password'
 import { FixedWindowRateLimiter } from '../src/utils/rate-limit'
 import { ERROR_HTTP_STATUS, ErrorCode, failure, success } from '../src/utils/response'
+import {
+  EMAIL_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  USERNAME_MAX_LENGTH,
+  validateEmail,
+  validatePassword,
+  validateUsername,
+} from '../src/utils/validation'
 
 const TEST_SECRET = 'unit-test-secret-key-0123456789abcdef'
 
@@ -140,5 +149,146 @@ describe('response', () => {
     expect(ERROR_HTTP_STATUS[ErrorCode.ACCOUNT_DISABLED]).toBe(403)
     expect(ERROR_HTTP_STATUS[ErrorCode.TOO_MANY_ATTEMPTS]).toBe(429)
     expect(ERROR_HTTP_STATUS[ErrorCode.INTERNAL_ERROR]).toBe(500)
+  })
+
+  test('账户管理相关错误码与 HTTP 状态码映射', () => {
+    expect(ERROR_HTTP_STATUS[ErrorCode.ADMIN_NOT_FOUND]).toBe(404)
+    expect(ERROR_HTTP_STATUS[ErrorCode.ADMIN_CONFLICT]).toBe(409)
+    expect(ERROR_HTTP_STATUS[ErrorCode.USERNAME_EXISTS]).toBe(409)
+    expect(ERROR_HTTP_STATUS[ErrorCode.EMAIL_EXISTS]).toBe(409)
+    expect(ErrorCode.ADMIN_NOT_FOUND).toBe(40401)
+    expect(ErrorCode.USERNAME_EXISTS).toBe(40901)
+    expect(ErrorCode.EMAIL_EXISTS).toBe(40902)
+  })
+})
+
+describe('validation', () => {
+  test('用户名：合法值去除首尾空白', () => {
+    const result = validateUsername('  editor01  ')
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.value).toBe('editor01')
+  })
+
+  test('用户名：空值 / 非字符串 / 非法字符 / 超长均失败', () => {
+    expect(validateUsername('').ok).toBe(false)
+    expect(validateUsername('   ').ok).toBe(false)
+    expect(validateUsername(undefined).ok).toBe(false)
+    expect(validateUsername(null).ok).toBe(false)
+    expect(validateUsername(123).ok).toBe(false)
+    expect(validateUsername('editor 01').ok).toBe(false)
+    expect(validateUsername('editor@01').ok).toBe(false)
+    expect(validateUsername('a'.repeat(USERNAME_MAX_LENGTH + 1)).ok).toBe(false)
+  })
+
+  test('用户名：缺失与空白都提示"不能为空"', () => {
+    const missing = validateUsername(undefined)
+    expect(missing.ok).toBe(false)
+    if (!missing.ok) expect(missing.message).toBe('用户名不能为空')
+    const blank = validateUsername('   ')
+    expect(blank.ok).toBe(false)
+    if (!blank.ok) expect(blank.message).toBe('用户名不能为空')
+  })
+
+  test('用户名：允许字母数字下划线中划线点', () => {
+    for (const name of ['admin', 'editor_01', 'a-b.c', 'Admin2026']) {
+      expect(validateUsername(name).ok).toBe(true)
+    }
+  })
+
+  test('密码：长度边界', () => {
+    expect(validatePassword('a'.repeat(PASSWORD_MIN_LENGTH)).ok).toBe(true)
+    expect(validatePassword('a'.repeat(PASSWORD_MIN_LENGTH - 1)).ok).toBe(false)
+    expect(validatePassword(12345678).ok).toBe(false)
+  })
+
+  test('密码：缺失提示"不能为空"', () => {
+    const missing = validatePassword(undefined)
+    expect(missing.ok).toBe(false)
+    if (!missing.ok) expect(missing.message).toBe('密码不能为空')
+  })
+
+  test('密码：保留首尾空格（不 trim）', () => {
+    const result = validatePassword('  Passw0rd!  ')
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.value).toBe('  Passw0rd!  ')
+  })
+
+  test('邮箱：undefined / null / 空串都归一化为 null', () => {
+    for (const raw of [undefined, null, '', '   ']) {
+      const result = validateEmail(raw)
+      expect(result.ok).toBe(true)
+      if (result.ok) expect(result.value).toBeNull()
+    }
+  })
+
+  test('邮箱：合法地址去除首尾空白', () => {
+    const result = validateEmail('  editor01@example.com  ')
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.value).toBe('editor01@example.com')
+  })
+
+  test('邮箱：非法格式 / 非字符串 / 超长均失败', () => {
+    expect(validateEmail('not-an-email').ok).toBe(false)
+    expect(validateEmail('bad@').ok).toBe(false)
+    expect(validateEmail('a@b').ok).toBe(false)
+    expect(validateEmail(123).ok).toBe(false)
+    expect(validateEmail(`${'a'.repeat(EMAIL_MAX_LENGTH)}@example.com`).ok).toBe(false)
+  })
+})
+
+describe('buildAdminUpdatePlan（只更新变化字段）', () => {
+  const current = { username: 'admin', email: 'admin@example.com' }
+
+  test('未提供任何字段 -> 空计划', () => {
+    const plan = buildAdminUpdatePlan(current, {})
+    expect(plan.sets).toEqual([])
+    expect(plan.values).toEqual([])
+    expect(plan.changedFields).toEqual([])
+  })
+
+  test('字段值与当前值相同 -> 不进入 SET 子句', () => {
+    const plan = buildAdminUpdatePlan(current, {
+      username: 'admin',
+      email: 'admin@example.com',
+    })
+    expect(plan.sets).toEqual([])
+    expect(plan.changedFields).toEqual([])
+  })
+
+  test('只改账户名 -> 只含 username', () => {
+    const plan = buildAdminUpdatePlan(current, { username: 'newName' })
+    expect(plan.sets).toEqual(['username = ?'])
+    expect(plan.values).toEqual(['newName'])
+    expect(plan.changedFields).toEqual(['username'])
+  })
+
+  test('只改邮箱 -> 只含 email', () => {
+    const plan = buildAdminUpdatePlan(current, { email: 'new@example.com' })
+    expect(plan.sets).toEqual(['email = ?'])
+    expect(plan.values).toEqual(['new@example.com'])
+    expect(plan.changedFields).toEqual(['email'])
+  })
+
+  test('清空邮箱（传 null）-> 写入 null 值', () => {
+    const plan = buildAdminUpdatePlan(current, { email: null })
+    expect(plan.sets).toEqual(['email = ?'])
+    expect(plan.values).toEqual([null])
+    expect(plan.changedFields).toEqual(['email'])
+  })
+
+  test('当前邮箱已为空时传 null -> 不变更', () => {
+    const plan = buildAdminUpdatePlan({ username: 'admin', email: null }, { email: null })
+    expect(plan.sets).toEqual([])
+    expect(plan.changedFields).toEqual([])
+  })
+
+  test('同时改账户名与邮箱 -> 两个字段都在计划里', () => {
+    const plan = buildAdminUpdatePlan(current, {
+      username: 'newName',
+      email: 'new@example.com',
+    })
+    expect(plan.sets).toEqual(['username = ?', 'email = ?'])
+    expect(plan.values).toEqual(['newName', 'new@example.com'])
+    expect(plan.changedFields).toEqual(['username', 'email'])
   })
 })

@@ -7,9 +7,22 @@
 import { describe, expect, test } from 'bun:test'
 import { createApp } from '../src/app'
 import { env } from '../src/config/env'
+import { execute } from '../src/db'
 import { signAdminToken } from '../src/utils/jwt'
 
 const app = createApp()
+
+/**
+ * 删除测试过程中创建的临时管理员账户。
+ * backend/.env 指向的是远程共享数据库，测试绝不能留下垃圾数据。
+ */
+async function cleanupTestAdmin(username: string): Promise<void> {
+  try {
+    await execute('DELETE FROM admins WHERE username = ?', [username])
+  } catch {
+    // 清理失败不影响测试结论
+  }
+}
 
 /** 统一响应体 */
 type JsonBody = {
@@ -159,5 +172,287 @@ describe('CORS 白名单', () => {
       },
     })
     expect(response.headers.get('access-control-allow-origin')).toBeNull()
+  })
+})
+
+// ---------- 管理员账户管理接口 ----------
+
+/** 生成一个合法管理员 token，用于访问受保护接口 */
+async function adminToken(): Promise<string> {
+  const { token } = await signAdminToken(
+    { id: 1, username: 'admin', nickname: '系统管理员' },
+    env.jwtSecret,
+    '1h',
+  )
+  return token
+}
+
+/**
+ * 生成一个指向"不存在管理员"的 token。
+ *
+ * 用它访问写接口时，服务层只会查一次库就返回 404，
+ * 因此测试可以覆盖到业务分支，又不会对数据库产生任何写操作
+ * （backend/.env 指向的是远程共享库，测试绝不能污染真实数据）。
+ */
+async function ghostToken(): Promise<string> {
+  const { token } = await signAdminToken(
+    { id: 999999999, username: 'ghost', nickname: null },
+    env.jwtSecret,
+    '1h',
+  )
+  return token
+}
+
+/** 带 token 的 JSON POST */
+async function callJson(path: string, payload: unknown, token?: string) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (token) headers.Authorization = `Bearer ${token}`
+  return call(path, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload),
+  })
+}
+
+describe('POST /admin/user/create 鉴权', () => {
+  test('无 Authorization -> 40100 / 401', async () => {
+    const { response, body } = await call('/admin/user/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'editor01', password: 'Passw0rd!' }),
+    })
+    expect(response.status).toBe(401)
+    expect(body?.code).toBe(40100)
+  })
+
+  test('伪造 token -> 40100 / 401', async () => {
+    const { response, body } = await call('/admin/user/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer not-a-real-token' },
+      body: JSON.stringify({ username: 'editor01', password: 'Passw0rd!' }),
+    })
+    expect(response.status).toBe(401)
+    expect(body?.code).toBe(40100)
+  })
+})
+
+describe('POST /admin/user/create 参数校验', () => {
+  test('非法 JSON -> 40000 / 400', async () => {
+    const token = await adminToken()
+    const { response, body } = await call('/admin/user/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: 'not-json',
+    })
+    expect(response.status).toBe(400)
+    expect(body?.code).toBe(40000)
+    expect(body?.message).toBe('请求体必须是合法的 JSON')
+  })
+
+  test('请求体不是 JSON 对象 -> 40000 / 400', async () => {
+    const token = await adminToken()
+    const { response, body } = await callJson('/admin/user/create', ['admin'], token)
+    expect(response.status).toBe(400)
+    expect(body?.code).toBe(40000)
+  })
+
+  test('缺少用户名 -> 40000 / 400', async () => {
+    const token = await adminToken()
+    const { response, body } = await callJson('/admin/user/create', { password: 'Passw0rd!' }, token)
+    expect(response.status).toBe(400)
+    expect(body?.code).toBe(40000)
+    expect(body?.message).toBe('用户名不能为空')
+  })
+
+  test('缺少密码 -> 40000 / 400', async () => {
+    const token = await adminToken()
+    const { response, body } = await callJson('/admin/user/create', { username: 'editor01' }, token)
+    expect(response.status).toBe(400)
+    expect(body?.code).toBe(40000)
+    expect(body?.message).toBe('密码不能为空')
+  })
+
+  test('密码不足 8 位 -> 40000 / 400', async () => {
+    const token = await adminToken()
+    const { response, body } = await callJson(
+      '/admin/user/create',
+      { username: 'editor01', password: 'short' },
+      token,
+    )
+    expect(response.status).toBe(400)
+    expect(body?.code).toBe(40000)
+    expect(body?.message).toBe('密码至少 8 位')
+  })
+
+  test('用户名字符非法 -> 40000 / 400', async () => {
+    const token = await adminToken()
+    const { response, body } = await callJson(
+      '/admin/user/create',
+      { username: 'editor 01!', password: 'Passw0rd!' },
+      token,
+    )
+    expect(response.status).toBe(400)
+    expect(body?.code).toBe(40000)
+  })
+
+  test('邮箱格式错误 -> 40000 / 400', async () => {
+    const token = await adminToken()
+    const { response, body } = await callJson(
+      '/admin/user/create',
+      { username: 'editor01', password: 'Passw0rd!', email: 'not-an-email' },
+      token,
+    )
+    expect(response.status).toBe(400)
+    expect(body?.code).toBe(40000)
+    expect(body?.message).toBe('邮箱格式不正确')
+  })
+
+  test('参数合法 -> 进入业务分支（成功 / 冲突 / 数据库不可用兜底）', async () => {
+    const token = await adminToken()
+    // 使用当前登录管理员自己的用户名，必然命中唯一约束 -> 409，不会新增账户
+    const { response, body } = await callJson(
+      '/admin/user/create',
+      { username: 'admin', password: 'Passw0rd!' },
+      token,
+    )
+    expect([200, 409, 500].includes(response.status)).toBe(true)
+    expect(typeof body?.code).toBe('number')
+    if (response.status === 409) {
+      expect(body?.code).toBe(40901)
+      expect(body?.message).toBe('账户名已存在')
+      expect(body?.data).toBeNull()
+    }
+    if (response.status === 500) {
+      expect(body?.code).toBe(50000)
+      expect(JSON.stringify(body).includes('stack')).toBe(false)
+    }
+  })
+
+  test('创建成功 -> 返回 id / username / email，且不泄露密码哈希', async () => {
+    const token = await adminToken()
+    const username = `test_tmp_${Date.now().toString(36)}`
+    const { response, body } = await callJson(
+      '/admin/user/create',
+      { username, password: 'Passw0rd!', email: `${username}@example.com` },
+      token,
+    )
+    try {
+      expect(response.status).toBe(200)
+      expect(body?.code).toBe(0)
+      expect(body?.message).toBe('创建成功')
+      const data = body?.data as { id?: number; username?: string; email?: string } | null
+      expect(typeof data?.id).toBe('number')
+      expect(data?.username).toBe(username)
+      expect(data?.email).toBe(`${username}@example.com`)
+      // 绝不回传 password_hash
+      expect(JSON.stringify(body)).not.toContain('password')
+      expect(JSON.stringify(body)).not.toContain('hash')
+    } finally {
+      // 共享库必须保持干净：无论断言是否通过都清理掉临时账户
+      await cleanupTestAdmin(username)
+    }
+  })
+})
+
+describe('POST /admin/user/settings 鉴权', () => {
+  test('无 Authorization -> 40100 / 401', async () => {
+    const { response, body } = await call('/admin/user/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'newname' }),
+    })
+    expect(response.status).toBe(401)
+    expect(body?.code).toBe(40100)
+  })
+
+  test('伪造 token -> 40100 / 401', async () => {
+    const { response, body } = await call('/admin/user/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer not-a-real-token' },
+      body: JSON.stringify({ username: 'newname' }),
+    })
+    expect(response.status).toBe(401)
+    expect(body?.code).toBe(40100)
+  })
+})
+
+describe('POST /admin/user/settings 参数校验', () => {
+  test('非法 JSON -> 40000 / 400', async () => {
+    const token = await adminToken()
+    const { response, body } = await call('/admin/user/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: 'not-json',
+    })
+    expect(response.status).toBe(400)
+    expect(body?.code).toBe(40000)
+    expect(body?.message).toBe('请求体必须是合法的 JSON')
+  })
+
+  test('三个字段都未提供 -> 40000 / 400', async () => {
+    const token = await adminToken()
+    const { response, body } = await callJson('/admin/user/settings', {}, token)
+    expect(response.status).toBe(400)
+    expect(body?.code).toBe(40000)
+    expect(body?.message).toBe('至少需要提供一个要修改的字段')
+  })
+
+  test('用户名为空串 -> 40000 / 400', async () => {
+    const token = await adminToken()
+    const { response, body } = await callJson('/admin/user/settings', { username: '   ' }, token)
+    expect(response.status).toBe(400)
+    expect(body?.code).toBe(40000)
+    expect(body?.message).toBe('用户名不能为空')
+  })
+
+  test('密码不足 8 位 -> 40000 / 400', async () => {
+    const token = await adminToken()
+    const { response, body } = await callJson('/admin/user/settings', { password: 'short' }, token)
+    expect(response.status).toBe(400)
+    expect(body?.code).toBe(40000)
+    expect(body?.message).toBe('密码至少 8 位')
+  })
+
+  test('邮箱格式错误 -> 40000 / 400', async () => {
+    const token = await adminToken()
+    const { response, body } = await callJson('/admin/user/settings', { email: 'bad@' }, token)
+    expect(response.status).toBe(400)
+    expect(body?.code).toBe(40000)
+    expect(body?.message).toBe('邮箱格式不正确')
+  })
+
+  test('只传密码 -> 校验通过并进入业务分支', async () => {
+    const token = await ghostToken()
+    const { response, body } = await callJson('/admin/user/settings', { password: 'NewPass123' }, token)
+    // 幽灵 id 一定查不到记录 -> 404；数据库不可用时由全局 onError 兜底 500
+    expect([404, 500].includes(response.status)).toBe(true)
+    expect(typeof body?.code).toBe('number')
+    if (response.status === 404) {
+      expect(body?.code).toBe(40401)
+      expect(body?.message).toBe('管理员不存在')
+      expect(body?.data).toBeNull()
+    }
+    if (response.status === 500) {
+      expect(body?.code).toBe(50000)
+      expect(JSON.stringify(body).includes('stack')).toBe(false)
+    }
+  })
+
+  test('只传邮箱（清空语义）-> 校验通过并进入业务分支', async () => {
+    const token = await ghostToken()
+    const { response, body } = await callJson('/admin/user/settings', { email: '' }, token)
+    expect([404, 500].includes(response.status)).toBe(true)
+    expect(body?.message).not.toBe('邮箱格式不正确')
+  })
+
+  test('账户名 + 邮箱组合 -> 校验通过并进入业务分支', async () => {
+    const token = await ghostToken()
+    const { response, body } = await callJson(
+      '/admin/user/settings',
+      { username: 'ghost-renamed', email: 'ghost@example.com' },
+      token,
+    )
+    expect([404, 500].includes(response.status)).toBe(true)
+    expect(typeof body?.code).toBe('number')
   })
 })

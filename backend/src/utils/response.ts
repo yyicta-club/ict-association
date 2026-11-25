@@ -21,6 +21,14 @@ export const ErrorCode = {
   FORBIDDEN: 40300,
   /** 账号已被禁用 */
   ACCOUNT_DISABLED: 40301,
+  /** 管理员不存在 */
+  ADMIN_NOT_FOUND: 40401,
+  /** 账户名或邮箱冲突（唯一索引冲突兜底） */
+  ADMIN_CONFLICT: 40900,
+  /** 账户名已存在 */
+  USERNAME_EXISTS: 40901,
+  /** 邮箱已被占用 */
+  EMAIL_EXISTS: 40902,
   /** 尝试次数过多 */
   TOO_MANY_ATTEMPTS: 42900,
   /** 服务器内部错误 */
@@ -37,6 +45,10 @@ export const ERROR_HTTP_STATUS: Record<number, ContentfulStatusCode> = {
   [ErrorCode.INVALID_CREDENTIALS]: 401,
   [ErrorCode.FORBIDDEN]: 403,
   [ErrorCode.ACCOUNT_DISABLED]: 403,
+  [ErrorCode.ADMIN_NOT_FOUND]: 404,
+  [ErrorCode.ADMIN_CONFLICT]: 409,
+  [ErrorCode.USERNAME_EXISTS]: 409,
+  [ErrorCode.EMAIL_EXISTS]: 409,
   [ErrorCode.TOO_MANY_ATTEMPTS]: 429,
   [ErrorCode.INTERNAL_ERROR]: 500,
 }

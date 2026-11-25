@@ -12,6 +12,7 @@ import type { AdminPublic, AdminRow } from '../types'
 import { signAdminToken } from '../utils/jwt'
 import { dummyVerify, verifyPassword } from '../utils/password'
 import { AppError, ErrorCode } from '../utils/response'
+import { recordSystemLog } from './system-log.service'
 
 export type LoginInput = {
   username: string
@@ -86,22 +87,5 @@ export async function performLogin(input: LoginInput): Promise<LoginResult> {
  * 日志写入失败绝不影响登录结果，异常只打印到控制台。
  */
 export async function recordLoginLog(input: LoginLogInput): Promise<void> {
-  try {
-    await execute(
-      `INSERT INTO system_logs (level, operation, module, operator_id, ip, request_path, status_code, detail)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        input.level,
-        input.operation,
-        input.module,
-        input.operatorId,
-        input.ip,
-        input.requestPath,
-        input.statusCode,
-        input.detail,
-      ],
-    )
-  } catch (error) {
-    console.error('[system-logs] 写入登录日志失败（已忽略，不影响登录结果）:', error)
-  }
+  await recordSystemLog(input)
 }
