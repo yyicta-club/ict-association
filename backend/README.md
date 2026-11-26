@@ -7,6 +7,7 @@
 - 统一响应体：`{ code, message, data }`，同时返回 HTTP 状态码
 - MySQL 未启动时服务照常启动，由 `GET /health` 暴露数据库状态
 - 静态资源：图片上传（管理员 / 游客入口）、列表、软删除与恢复，详见 [`docs/static-files.md`](docs/static-files.md)
+- 文章管理：创建、部分修改、软删除（正文为纯 Markdown），详见 [`docs/articles.md`](docs/articles.md)
 
 ---
 
@@ -126,12 +127,14 @@ backend/
 ├── tsconfig.json             # ESNext + bundler 解析 + strict + bun types
 ├── README.md
 ├── docs/
-│   └── static-files.md       # 静态图片资源接口 · 运维与后端手册
+│   ├── openapi-static-files.yaml # 静态资源接口 OpenAPI 规格（可导入 Apifox）
+│   └── openapi-articles.yaml      # 文章接口 OpenAPI 规格（可导入 Apifox）
 ├── scripts/
 │   ├── init-db.ts            # 读取并执行 src/db/v1.sql（建库建表 + 初始数据）
 │   └── seed-admin.ts         # 初始化管理员：密码哈希后入库，已存在则更新密码
 ├── test/
 │   ├── app.test.ts           # 接口层集成测试：路由 / 鉴权 / CORS / 404（不访问数据库）
+│   ├── article.test.ts       # 文章入参校验与更新计划单测（纯函数，不访问数据库）
 │   ├── utils.test.ts         # 单元测试：密码 / JWT / 限流器 / 响应体 / 入参校验 / 日志脱敏
 │   ├── image-inspect.test.ts # 图片签名识别 / 完整解码 / 像素上限
 │   └── trusted-proxy.test.ts # 可信代理：IP 归一化 / CIDR 匹配 / 代理链解析
@@ -141,10 +144,7 @@ backend/
     ├── config/env.ts         # 环境变量集中读取、默认值与启动校验
     ├── db/
     │   ├── index.ts          # mysql2 连接池 + query<T>() / execute() + 命名锁（GET_LOCK）
-    │   ├── v1.sql            # 表结构（含 static_assets.deleted_at 与 idx_category_md5）
-    │   └── migrations/
-    │       ├── 2026-11-26_static_assets_deleted_at.sql     # 增量迁移（加 deleted_at，幂等）
-    │       └── 2026-11-27_static_assets_category_md5_index.sql # 增量迁移（加 (category, md5) 索引，幂等）
+    │   ├── v1.sql            # 表结构（含 static_assets.deleted_at、articles.deleted_at）
     ├── middlewares/
     │   ├── logger.ts         # 请求日志（method/path/status/耗时）
     │   ├── auth.ts           # adminAuth：Bearer 校验 → 写入 c.var.admin
@@ -154,6 +154,7 @@ backend/
     │   │   ├── index.ts      # /admin 路由组
     │   │   ├── auth.ts       # POST /admin/login
     │   │   ├── user.ts       # POST /admin/user/create、/admin/user/settings
+    │   │   ├── article.ts    # POST /admin/article/create、/setting、/delete
     │   │   └── static-file.ts # 上传 / 列表 / 软删除 / 恢复
     │   ├── tourist/
     │   │   ├── index.ts      # /tourist 路由组（占位，后续新闻/评论在此扩展）
@@ -162,6 +163,7 @@ backend/
     ├── services/
     │   ├── admin-auth.service.ts  # 登录业务逻辑 + 登录日志落库
     │   ├── admin-user.service.ts  # 管理员账户创建与资料修改
+    │   ├── article.service.ts     # 文章创建 / 部分修改 / 软删除 + 关联资源校验
     │   ├── static-file.service.ts # 分类白名单、落库、列表、软删除与恢复
     │   ├── static-file-dedup.service.ts # 指纹计算、锁名生成、已存文件核对
     │   ├── static-file-storage.service.ts # 路径规划、独占写入、失败清理
@@ -176,6 +178,7 @@ backend/
     │   ├── image-inspect.ts  # 图片签名识别 + 完整解码校验 + 像素上限
     │   ├── multipart.ts      # 限长读取请求体（不信任 Content-Length）+ multipart 解析
     │   ├── query-params.ts   # 查询参数校验（正整数 / 固定枚举）
+    │   ├── article-validation.ts # 文章入参校验（标题/slug/正文安全/状态/布尔/ID/未知字段）
     │   ├── log.ts            # 日志脱敏：describeError() / sanitizeLogDetail()
     │   └── validation.ts     # 用户名 / 密码 / 邮箱等入参校验
     └── types/index.ts        # AdminRow / AdminPublic / JwtAdminPayload / AppVariables
@@ -201,10 +204,12 @@ backend/
 | `40301` | 账号已被禁用 | 403 |
 | `40401` | 管理员不存在 | 404 |
 | `40402` | **静态资源不存在** | 404 |
+| `40403` | **文章不存在（或已被软删除）** | 404 |
 | `40900` | 账户名或邮箱冲突 | 409 |
 | `40901` | 账户名已存在 | 409 |
 | `40902` | 邮箱已被占用 | 409 |
 | `40903` | **资源指纹冲突 / 已存文件校验失败** | 409 |
+| `40904` | **文章 slug 已被占用** | 409 |
 | `41300` | **单个上传文件超过大小上限** | 413 |
 | `41301` | **上传请求体超过大小上限** | 413 |
 | `41302` | **图片累计解码像素超过上限** | 413 |
@@ -521,6 +526,70 @@ Content-Type: application/json
 
 > **幂等**：重复删除返回成功（`deletedAt` 保持第一次的删除时间）；重复恢复同样返回成功（`deletedAt` 保持 `null`）。
 
+### 4.11 后台文章接口总览
+
+三个后台文章接口，统一复用既有 Hono 应用、统一响应体 `{ code, message, data }`、参数化 SQL 与 `system_logs` 审计日志。完整契约见 [`docs/articles.md`](docs/articles.md) 与 [`docs/openapi-articles.yaml`](docs/openapi-articles.yaml)。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+| --- | --- | --- | --- |
+| `POST` | `/admin/article/create` | 管理员 | 创建文章（必填 `title` / `slug` / `content`） |
+| `POST` | `/admin/article/setting` | 管理员 | 部分修改文章（必填 `id` + 至少一个可修改字段） |
+| `POST` | `/admin/article/delete` | 管理员 | 软删除文章（只写 `deleted_at`） |
+
+**字段规则**
+
+| 字段 | 类型 | 规则 |
+| --- | --- | --- |
+| `title` | string | 必填；去首尾空白后 1..200 字符（对齐 `articles.title`） |
+| `slug` | string | 必填；1..200 字符，必须匹配 `^[a-z0-9]+(?:-[a-z0-9]+)*$`；全局唯一 |
+| `content` | string | 必填；纯 Markdown；非空、UTF-8 编码后 ≤ 102400 字节（100 KB）、不含原始 HTML、不含不安全 URL scheme |
+| `summary` | string \| null | 可选；≤ 500 字符；`null` / 空串表示清空 |
+| `cover_asset_id` | integer \| null | 可选；必须是**存在、未软删除、`category = 'article'`** 的图片资源 |
+| `category_id` | integer \| null | 可选；必须存在于 `categories` 表 |
+| `status` | integer | 可选；`0` 草稿 / `1` 已发布 / `2` 已下架；**只接受数字类型** |
+| `is_top` | boolean | 可选；**只接受布尔值** `true` / `false` |
+
+- **未知字段一律拒绝**：请求体只接受上表字段（`setting` 另加 `id`），多余的键返回 400 `40000`「不支持的字段: ...」。
+- **服务端托管字段**：`published_at`（发布时间）与 `view_count`（浏览量）不接受客户端写入；`published_at` 在状态首次变为「已发布」时由服务端补写 `NOW()`，`view_count` 这三个接口永不写。
+- **只更新提供的字段**：`setting` 只写请求里出现且与当前值不同的字段，未提供的字段原样保留；`summary` / `cover_asset_id` / `category_id` 传 `null` 表示清空。
+
+**文章元数据**（三个接口的 `data` 结构一致，**不回显正文**）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | `number` | 文章 ID |
+| `title` | `string` | 标题 |
+| `slug` | `string` | URL 标识 |
+| `summary` | `string \| null` | 摘要 |
+| `coverAssetId` | `number \| null` | 封面资源 id |
+| `categoryId` | `number \| null` | 分类 id |
+| `status` | `number` | `0` / `1` / `2` |
+| `isTop` | `boolean` | 是否置顶 |
+| `viewCount` | `number` | 浏览量（服务端维护） |
+| `publishedAt` | `string \| null` | 发布时间（MySQL `DATETIME` 字符串） |
+| `createdAt` | `string` | 创建时间 |
+| `updatedAt` | `string` | 更新时间 |
+| `deletedAt` | `string \| null` | 软删除时间；未删除为 `null` |
+
+> `setting` 的 `data` 额外带 `changedFields: string[]`（本次真正发生变更的字段名；无变化时为空数组）。
+
+**错误场景**
+
+| 场景 | HTTP | code | message |
+| --- | --- | --- | --- |
+| 未携带 / 非法 token | 401 | 40100 | 未登录或登录已过期 |
+| 请求体不是合法 JSON / 不是 JSON 对象 | 400 | 40000 | 请求体必须是合法的 JSON / 请求体必须是 JSON 对象 |
+| 出现未知字段 | 400 | 40000 | 不支持的字段: `<字段名>` |
+| 字段类型 / 长度 / slug 格式 / 正文安全校验失败 | 400 | 40000 | 见 [`docs/articles.md` 4.2](docs/articles.md) 的错误场景表 |
+| `setting` 只有 `id` 没有可修改字段 | 400 | 40000 | 至少需要提供一个要修改的字段 |
+| 分类不存在 | 400 | 40000 | 分类不存在 |
+| 封面资源不存在 / 已删除 / 不是文章配图 | 400 | 40000 | 封面资源不存在 / 封面资源已删除 / 封面资源必须是文章配图 |
+| slug 已被占用（含已软删除的文章） | 409 | 40904 | slug 已被占用 |
+| 文章不存在或已被软删除 | 404 | 40403 | 文章不存在 |
+| 数据库不可用等异常 | 500 | 50000 | 服务器内部错误 |
+
+> **软删除**：只写 `articles.deleted_at`，文章行、评论（`comments`）与标签关联（`article_tags`）全部保留，不做级联清理；删除**不幂等**（重复删除返回 404 `40403`）；已软删除的文章仍占用唯一索引 `uk_slug`，其 slug 不能被新文章复用；本次**不提供恢复接口**。
+
 ---
 
 ## 5. 安全约定
@@ -551,7 +620,19 @@ Content-Type: application/json
 - **日志脱敏**：不再直接打印数据库异常对象，只打印脱敏后的错误描述（错误类型 + 驱动错误码），不输出 SQL、参数、token 与内部绝对路径；日志详情去控制字符、抹掉疑似绝对路径并截断到 500 字符。
 - **多实例部署的限制**：本次只实现**单后端实例**部署；多实例下共享限流与跨系统原子提交不在范围内（详见 [`docs/static-files.md`](docs/static-files.md)）。
 
-### 5.2 上线前还需
+### 5.2 文章相关
+
+- **鉴权**：三个文章接口整组挂 `adminAuth`，未登录一律 401 `40100`，不进入业务逻辑。
+- **先校验后落库**：所有入参校验都是纯函数（`src/utils/article-validation.ts`），**任何校验失败都在触碰数据库之前返回 400**；`setting` / `delete` 先读当前文章（`deleted_at IS NULL`）再决定写什么。
+- **字段白名单**：请求体只接受约定字段，`published_at` / `view_count` / `deleted_at` 等服务端托管字段出现即拒绝，避免越权写入。
+- **严格类型**：`status` 只接受数字 `0` / `1` / `2`，`is_top` 只接受布尔 `true` / `false`，所有 id 必须是正安全整数（数字类型）；字符串 `"1"`、`0` / `1` 形式的布尔值一律拒绝。
+- **正文只接受纯 Markdown**：拒绝原始 HTML（标签 / 注释 / DOCTYPE）与不安全的 URL scheme（`javascript` / `vbscript` / `data` / `file`）；扫描前会解码 HTML 实体、去掉控制字符并转小写，挡住实体编码与控制字符混淆；scheme 前要求不是字母 / 数字（`profile:` 不会误判成 `file:`）、冒号后必须紧贴非空白字符（`Data: 说明` 不会误判）。正文上限 100 KB（UTF-8 编码后）。
+- **slug 规范**：只允许小写字母、数字与单个连字符分隔；唯一性由数据库唯一索引 `uk_slug` 兜底，服务层先查重给出友好提示、再用 `ER_DUP_ENTRY` 兜底并发冲突。
+- **关联资源先查后写**：分类必须存在；封面必须是**存在、未软删除、`category = 'article'`** 的图片资源。
+- **软删除只标记**：只写 `articles.deleted_at`，不物理删除文章，不级联清理评论与标签关联；文章不存在或已软删除统一返回 404 `40403`。
+- **审计日志不记正文**：`system_logs`（`module = 'article'`）只记录文章 id、状态、变更字段名等元信息，**绝不记录正文、标题、摘要或完整请求体**；日志写入失败不影响主流程。
+
+### 5.3 上线前还需
 
 - 启用 HTTPS、所有 `/admin` 写接口挂 `adminAuth`、多实例部署时把限流换成 Redis、日志脱敏
 
@@ -578,7 +659,7 @@ bun test            # 单元 + 集成测试（密码 / JWT / 限流 / 响应体 
 
 ### 7.1 本次实际执行的结果
 
-在 `backend/` 目录下实际运行（只读性质的命令，未执行 `db:init` / `db:init -- --force` / `seed:admin`，未连接任何 MySQL 数据库）：
+在 `backend/` 目录下实际运行：
 
 ```sh
 cd backend
@@ -589,23 +670,56 @@ pnpm test            # -> bun test
 | 命令 | 结果 |
 | --- | --- |
 | `pnpm run typecheck` | **通过**，无类型错误（`tsc --noEmit` 退出码 0，无输出） |
-| `pnpm test` | **通过**，**150 个用例全部通过，0 失败**（`Ran 150 tests across 4 files`，417 次 `expect()` 断言） |
+| `pnpm test` | **通过**，**198 个用例全部通过，0 失败**（`Ran 198 tests across 5 files`，594 次 `expect()` 断言） |
 
 `pnpm test` 的用例分布：
 
 | 测试文件 | 用例数 | 覆盖内容 |
 | --- | --- | --- |
 | `test/trusted-proxy.test.ts` | 62 | IP 归一化（去前导零 / 端口 / zone id / IPv4-mapped 折回）、IPv4 与 IPv6 解析、CIDR 匹配、`TRUSTED_PROXIES` 列表解析、可信代理链自右向左剥离、伪造转发头无效 |
+| `test/article.test.ts` | 42 | 文章入参校验（标题 / slug / 摘要长度与格式、状态枚举、布尔值、ID、未知字段）、正文 Markdown 安全边界（空值 / 超长 / 原始 HTML / 不安全 scheme / 混淆绕过 / 合法 Markdown）、创建 / 修改 / 删除请求解析、`buildArticleUpdatePlan` 只更新变化字段、文章错误码映射 |
 | `test/image-inspect.test.ts` | 34 | 文件头签名识别（PNG / JPEG / WebP / GIF）、格式伪装与非图片识别、规范扩展名与 MIME、完整解码校验、累计像素上限（含动画帧数计费） |
 | `test/utils.test.ts` | 43 | 密码哈希往返与随机盐、JWT 往返 / 篡改 / 过期 / 错密钥拒绝、有效期解析、限流器、响应体与错误码映射（含静态资源错误码）、入参校验、日志脱敏 |
-| `test/app.test.ts` | 11 | `adminAuth` 中间件（无 token / 伪造 token / 合法 token）、未知路由 404、`/tourist` 占位接口、CORS 白名单、`/admin/user/*` 的鉴权拦截 |
-| **合计** | **150** | |
-### 7.2 已知缺项
+| `test/app.test.ts` | 17 | `adminAuth` 中间件（无 token / 伪造 token / 合法 token）、未知路由 404、`/tourist` 占位接口、CORS 白名单、`/admin/user/*` 与 `/admin/article/*` 的鉴权拦截 |
+| **合计** | **198** | |
+
+### 7.2 文章接口的数据库实测
+
+文章接口依赖 MySQL，本次在**开发库**（`backend/.env` 指向的 `ict_association`）上做了完整链路实测：
+
+```sh
+# 1) 执行增量迁移（幂等；已执行过一次，重复执行只打印 [skip]）
+mysql -h <host> -P <port> -u <user> -p <DB_NAME> < backend/src/db/migrations/2026-11-27_articles_deleted_at.sql
+```
+
+迁移后核对结果：`articles.deleted_at`（`DATETIME` / 可空 / 注释为软删除说明）与索引 `idx_deleted_id (deleted_at, id)` 均已存在，`articles` 既有数据全部处于未删除状态。
+
+随后以真实 HTTP 请求（`createApp().request(...)` + 真实管理员 token）跑了一遍完整链路，**36 项检查全部通过**，验证脚本用完即删：
+
+| 验证项 | 结果 |
+| --- | --- |
+| 未携带 token 调用 `create` | 401 / `40100` |
+| 10 类参数校验失败（未知字段、slug 大写、原始 HTML、不安全 scheme、空正文、非法状态、状态类型错误、`is_top` 类型错误、id 类型错误、无可修改字段） | 全部 400 / `40000`，且校验期间 `articles` 表**零写入** |
+| 分类不存在 / 封面不存在 / 封面已删除 / 封面不是文章配图 | 400 / `40000`，文案分别为「分类不存在」「封面资源不存在」「封面资源已删除」「封面资源必须是文章配图」 |
+| 创建成功 | 200 / `0`；`status=1`、`isTop=true`、`publishedAt` 非空、`viewCount=0`；响应**不回显正文** |
+| 重复 slug | 409 / `40904`「slug 已被占用」 |
+| 部分更新（只改 `title`） | 200 / `0`；`changedFields` 只含 `title`；正文 / slug / 摘要 / 状态 / 置顶 / 封面 / 分类 / 浏览量**全部原样保留** |
+| 状态改回草稿 | `published_at` 保留、`view_count` 不变 |
+| 软删除 | 200 / `0`；文章行与正文保留、`deleted_at` 非空；**评论与标签关联未被级联清理** |
+| 重复删除 / 修改已删除文章 | 404 / `40403` |
+| 软删除文章的 slug 被新文章复用 | 409 / `40904`（`uk_slug` 仍然占位） |
+| 删除不存在的文章 | 404 / `40403` |
+| 审计日志 | `system_logs` 有 `module='article'` 记录，且**不含正文 / 标题内容** |
+
+> 实测产生的测试数据（文章、评论、标签关联、静态资源临时行）在脚本结束时已全部清理；`system_logs` 中的审计记录按审计惯例保留。
+
+### 7.3 已知缺项
 
 - **本仓库目前没有 lint 脚本。** `backend/package.json` 的 `scripts` 只有 `dev` / `start` / `db:init` / `seed:admin` / `typecheck` / `test`，没有 ESLint / Biome 等 lint 配置与命令。
 - `pnpm run typecheck` 执行的是 `tsc --noEmit`，属于**类型检查**，**不能冒充 lint**；本节不把它当作 lint 结果。
 - 后续如需补上 lint，需要单独引入工具与配置（并把 `lint` 加进 `scripts` 与 CI），本次交付未包含。
 - **上传 / 列表 / 软删除 / 恢复 / 限流 / 故障补偿等接口目前没有自动化测试**（随内存假库一并移除），需要回归时只能手工验证或重新引入测试库方案。
+- 文章接口的数据库分支（slug 冲突、分类 / 封面存在性、软删除落库）目前**只有上面 7.2 的手工实测**，没有沉淀成自动化用例；`pnpm test` 保持"零数据库读写"的约定。
 
 待在本机安装 MySQL 8 后复跑（脚本与接口均已就绪）：
 

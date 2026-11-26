@@ -157,4 +157,64 @@ describe('受保护接口的鉴权拦截', () => {
     expect(response.status).toBe(401)
     expect(body?.code).toBe(40100)
   })
+
+  test('POST /admin/article/create 无 Authorization -> 40100 / 401', async () => {
+    const { response, body } = await call('/admin/article/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: '标题', slug: 'news-1', content: '正文' }),
+    })
+    expect(response.status).toBe(401)
+    expect(body?.code).toBe(40100)
+  })
+
+  test('POST /admin/article/create 伪造 token -> 40100 / 401', async () => {
+    const { response, body } = await call('/admin/article/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer not-a-real-token' },
+      body: JSON.stringify({ title: '标题', slug: 'news-1', content: '正文' }),
+    })
+    expect(response.status).toBe(401)
+    expect(body?.code).toBe(40100)
+  })
+
+  test('POST /admin/article/setting 无 Authorization -> 40100 / 401', async () => {
+    const { response, body } = await call('/admin/article/setting', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 1, title: '新标题' }),
+    })
+    expect(response.status).toBe(401)
+    expect(body?.code).toBe(40100)
+  })
+
+  test('POST /admin/article/setting 伪造 token -> 40100 / 401', async () => {
+    const { response, body } = await call('/admin/article/setting', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer not-a-real-token' },
+      body: JSON.stringify({ id: 1, title: '新标题' }),
+    })
+    expect(response.status).toBe(401)
+    expect(body?.code).toBe(40100)
+  })
+
+  test('POST /admin/article/delete 无 Authorization -> 40100 / 401', async () => {
+    const { response, body } = await call('/admin/article/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 1 }),
+    })
+    expect(response.status).toBe(401)
+    expect(body?.code).toBe(40100)
+  })
+
+  test('POST /admin/article/delete 伪造 token -> 40100 / 401', async () => {
+    const { response, body } = await call('/admin/article/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer not-a-real-token' },
+      body: JSON.stringify({ id: 1 }),
+    })
+    expect(response.status).toBe(401)
+    expect(body?.code).toBe(40100)
+  })
 })
