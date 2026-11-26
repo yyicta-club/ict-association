@@ -5,9 +5,13 @@
 import { Hono } from 'hono'
 import type { HonoEnv } from '../../types'
 import { success } from '../../utils/response'
+import { touristStaticFileRoutes } from './static-file'
 
 export const touristRoutes = new Hono<HonoEnv>()
 
 touristRoutes.get('/', (c) => c.json(success({ module: 'tourist', status: 'ready' }, '游客端接口占位')))
 
 touristRoutes.get('/ping', (c) => c.json(success({ pong: true }, 'pong')))
+
+// 静态资源上传（公开入口，只允许评论配图）
+touristRoutes.route('/static-files', touristStaticFileRoutes)

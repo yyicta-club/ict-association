@@ -5,10 +5,24 @@
  * 这样可以保证默认值唯一来源、缺失项在启动时立刻暴露，而不是运行到一半才报错。
  */
 import { existsSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { isAbsolute, parse, resolve } from 'node:path'
+import { parseTrustedProxies } from '../utils/ip'
+import type { TrustedProxyEntry } from '../utils/ip'
 
 /** backend 根目录（src/config -> ../..） */
 const BACKEND_ROOT = resolve(import.meta.dir, '..', '..')
+
+/** 1 MiB 的字节数 */
+export const MEBIBYTE = 1024 * 1024
+
+/** 单个上传文件允许的最大字节数：5 MiB */
+export const MAX_UPLOAD_FILE_BYTES = 5 * MEBIBYTE
+
+/** 整个上传请求体允许的最大字节数：6 MiB */
+export const MAX_UPLOAD_REQUEST_BYTES = 6 * MEBIBYTE
+
+/** 单张图片允许的累计解码像素上限（防止压缩炸弹） */
+export const MAX_UPLOAD_TOTAL_PIXELS = 40_000_000
 
 export interface DbConfig {
   host: string
@@ -17,6 +31,21 @@ export interface DbConfig {
   password: string
   database: string
   connectionLimit: number
+}
+
+export interface StaticFileConfig {
+  /** 上传根目录（绝对路径）；分类子目录与文件名都在其下 */
+  rootPath: string
+  /** 单文件字节上限 */
+  maxFileBytes: number
+  /** 整个上传请求体字节上限 */
+  maxRequestBytes: number
+  /** 单张图片累计解码像素上限 */
+  maxTotalPixels: number
+  /** 上传限流窗口（毫秒） */
+  rateLimitWindowMs: number
+  /** 上传限流窗口内允许的最大次数 */
+  rateLimitMax: number
 }
 
 export interface AppConfig {
@@ -32,6 +61,10 @@ export interface AppConfig {
   corsOrigins: string[]
   /** seed:admin 脚本使用的初始管理员 */
   adminInit: { username: string; password: string }
+  /** 静态资源（图片上传）配置 */
+  staticFile: StaticFileConfig
+  /** 可信代理（IP / CIDR）；默认空数组 = 不信任任何代理 */
+  trustedProxies: TrustedProxyEntry[]
 }
 
 /**
@@ -80,6 +113,23 @@ function toInt(raw: string | undefined, fallback: number, name: string): number 
   return value
 }
 
+/**
+ * 校验并归一化上传根目录。
+ * 必须是绝对路径，且不能是文件系统根目录（否则分类子目录会写错位置）。
+ */
+function resolveStaticFilePath(raw: string | undefined): string {
+  const value = (raw ?? '').trim()
+  if (value === '') return ''
+  if (!isAbsolute(value)) {
+    throw new Error(`STATIC_FILE_PATH 必须是绝对路径，当前值: ${value}`)
+  }
+  const resolved = resolve(value)
+  if (parse(resolved).root === resolved) {
+    throw new Error(`STATIC_FILE_PATH 不能是文件系统根目录，当前值: ${value}`)
+  }
+  return resolved
+}
+
 /** 读取并组装全部配置 */
 export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
   loadDotEnvFile(resolve(BACKEND_ROOT, '.env'), source as Record<string, string | undefined>)
@@ -116,6 +166,15 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
       username: (source.ADMIN_INIT_USERNAME ?? 'admin').trim() || 'admin',
       password: source.ADMIN_INIT_PASSWORD ?? '',
     },
+    staticFile: {
+      rootPath: resolveStaticFilePath(source.STATIC_FILE_PATH),
+      maxFileBytes: MAX_UPLOAD_FILE_BYTES,
+      maxRequestBytes: MAX_UPLOAD_REQUEST_BYTES,
+      maxTotalPixels: MAX_UPLOAD_TOTAL_PIXELS,
+      rateLimitWindowMs: toInt(source.STATIC_FILE_RATE_WINDOW_MS, 60_000, 'STATIC_FILE_RATE_WINDOW_MS'),
+      rateLimitMax: toInt(source.STATIC_FILE_RATE_MAX, 10, 'STATIC_FILE_RATE_MAX'),
+    },
+    trustedProxies: parseTrustedProxies(source.TRUSTED_PROXIES),
   }
 }
 
@@ -138,6 +197,18 @@ export function assertRuntimeEnv(config: AppConfig): void {
   }
   if (!Number.isInteger(config.db.port) || config.db.port < 1 || config.db.port > 65535) {
     problems.push(`DB_PORT 非法: ${config.db.port}`)
+  }
+  if (!config.staticFile.rootPath) {
+    problems.push('STATIC_FILE_PATH 未配置（上传目录绝对路径，示例见 backend/.env.example）')
+  }
+  if (config.staticFile.maxFileBytes < 1 || config.staticFile.maxFileBytes > MAX_UPLOAD_FILE_BYTES) {
+    problems.push(`STATIC_FILE 单文件上限非法: ${config.staticFile.maxFileBytes}`)
+  }
+  if (config.staticFile.maxRequestBytes < config.staticFile.maxFileBytes) {
+    problems.push('STATIC_FILE 请求体上限必须不小于单文件上限')
+  }
+  if (config.staticFile.rateLimitMax < 1) {
+    problems.push(`STATIC_FILE_RATE_MAX 非法: ${config.staticFile.rateLimitMax}`)
   }
   if (problems.length > 0) {
     throw new Error(`启动配置校验失败:\n  - ${problems.join('\n  - ')}`)

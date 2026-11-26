@@ -25,18 +25,20 @@ CREATE TABLE admins (
 -- ---------- 2. 静态资源表 ----------
 CREATE TABLE static_assets (
                                id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                               filename    VARCHAR(255) NOT NULL COMMENT '原始文件名',
-                               path        VARCHAR(500) NOT NULL COMMENT '存储相对路径, 如 /uploads/2026/11/logo.png',
+                               filename    VARCHAR(255) NOT NULL COMMENT '原始文件名(清洗后仅作展示, 不参与路径拼接)',
+                               path        VARCHAR(500) NOT NULL COMMENT '存储相对路径, 形如 article/2f1c....png',
                                url         VARCHAR(500) NULL COMMENT '对外访问地址(CDN/OSS), 未接 CDN 时留空直接用 path',
                                mime_type   VARCHAR(100) NULL COMMENT 'MIME, 如 image/png',
-                               category    VARCHAR(50)  NOT NULL DEFAULT 'general' COMMENT '用途: article/banner/avatar/general',
+                               category    VARCHAR(50)  NOT NULL DEFAULT 'general' COMMENT '用途: article(文章配图, 仅管理员上传) / gallery(图库, 仅管理员上传) / comment(评论配图, 管理员与游客均可上传); 保留历史分类值',
                                size_bytes  INT UNSIGNED NULL COMMENT '文件大小(字节)',
                                md5         CHAR(32)     NULL COMMENT '内容指纹, 用于重复上传去重',
-                               uploader_id BIGINT UNSIGNED NULL COMMENT '上传者 admins.id',
+                               uploader_id BIGINT UNSIGNED NULL COMMENT '上传者 admins.id, 游客上传为 NULL',
                                created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                               deleted_at  DATETIME     NULL DEFAULT NULL COMMENT '软删除时间; NULL=未删除, 非 NULL=已删除(仅影响管理状态, 不撤销已有访问地址)',
                                PRIMARY KEY (id),
                                UNIQUE KEY uk_path (path),
                                KEY idx_category (category),
+                               KEY idx_deleted_id (deleted_at, id),
                                CONSTRAINT fk_assets_uploader FOREIGN KEY (uploader_id) REFERENCES admins (id) ON DELETE SET NULL
 ) ENGINE=InnoDB COMMENT='静态资源表';
 

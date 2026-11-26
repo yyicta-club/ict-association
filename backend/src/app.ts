@@ -9,6 +9,7 @@ import { logger } from './middlewares/logger'
 import { adminRoutes } from './routes/admin'
 import { touristRoutes } from './routes/tourist'
 import type { HonoEnv } from './types'
+import { describeError } from './utils/log'
 import { ErrorCode, failure } from './utils/response'
 
 export function createApp(): Hono<HonoEnv> {
@@ -24,7 +25,8 @@ export function createApp(): Hono<HonoEnv> {
       },
       allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowHeaders: ['Content-Type', 'Authorization'],
-      exposeHeaders: ['Content-Length'],
+      // 前端需要读限流相关的响应头（429 时读 Retry-After）
+      exposeHeaders: ['Content-Length', 'Retry-After', 'X-RateLimit-Limit', 'X-RateLimit-Remaining'],
       credentials: true,
       maxAge: 600,
     }),
@@ -54,7 +56,8 @@ export function createApp(): Hono<HonoEnv> {
 
   // 全局兜底：绝不把堆栈泄露给客户端
   app.onError((error, c) => {
-    console.error(`[error] ${c.req.method} ${c.req.path} ->`, error)
+    // 只打印脱敏后的错误描述：数据库异常对象里可能带 SQL、参数与内部路径
+    console.error(`[error] ${c.req.method} ${c.req.path} ${describeError(error)}`)
     return c.json(failure(ErrorCode.INTERNAL_ERROR, '服务器内部错误'), 500)
   })
 

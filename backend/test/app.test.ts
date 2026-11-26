@@ -3,6 +3,9 @@
  *
  * 覆盖应用装配本身：路由挂载、统一响应体、404、鉴权中间件、CORS 白名单。
  * 数据库相关分支由 /health 的降级逻辑与登录接口的 500 兜底覆盖。
+ *
+ * 重要：test/setup.ts 在应用导入前已把 src/db 替换为内存假数据库、
+ * 把系统日志替换为内存记录，因此本文件的所有用例都不会访问任何真实数据库。
  */
 import { describe, expect, test } from 'bun:test'
 import { createApp } from '../src/app'
@@ -14,7 +17,7 @@ const app = createApp()
 
 /**
  * 删除测试过程中创建的临时管理员账户。
- * backend/.env 指向的是远程共享数据库，测试绝不能留下垃圾数据。
+ * 这里的 execute 已被 test/setup.ts 替换为内存假库，不会碰到真实数据库。
  */
 async function cleanupTestAdmin(username: string): Promise<void> {
   try {
@@ -192,7 +195,7 @@ async function adminToken(): Promise<string> {
  *
  * 用它访问写接口时，服务层只会查一次库就返回 404，
  * 因此测试可以覆盖到业务分支，又不会对数据库产生任何写操作
- * （backend/.env 指向的是远程共享库，测试绝不能污染真实数据）。
+ * （数据库已被替换为内存假库，测试绝不污染真实数据）。
  */
 async function ghostToken(): Promise<string> {
   const { token } = await signAdminToken(
@@ -348,7 +351,7 @@ describe('POST /admin/user/create 参数校验', () => {
       expect(JSON.stringify(body)).not.toContain('password')
       expect(JSON.stringify(body)).not.toContain('hash')
     } finally {
-      // 共享库必须保持干净：无论断言是否通过都清理掉临时账户
+      // 无论断言是否通过都清理掉临时账户
       await cleanupTestAdmin(username)
     }
   })

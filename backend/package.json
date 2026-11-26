@@ -12,7 +12,8 @@
   },
   "dependencies": {
     "hono": "^4.13.16",
-    "mysql2": "^3.24.6"
+    "mysql2": "^3.24.6",
+    "sharp": "^0.35.5"
   },
   "devDependencies": {
     "@types/bun": "latest",

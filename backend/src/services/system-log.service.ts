@@ -6,6 +6,7 @@
  * - 绝不记录密码、密码哈希与 token
  */
 import { execute } from '../db'
+import { describeError, sanitizeLogDetail } from '../utils/log'
 
 export type SystemLogInput = {
   level: 'INFO' | 'WARN' | 'ERROR'
@@ -54,7 +55,7 @@ export async function recordSystemLog(input: SystemLogInput): Promise<void> {
         input.ip,
         input.requestPath,
         input.statusCode,
-        input.detail,
+        sanitizeLogDetail(input.detail),
       ],
     )
   } catch (error) {
@@ -71,15 +72,18 @@ export async function recordSystemLog(input: SystemLogInput): Promise<void> {
             input.ip,
             input.requestPath,
             input.statusCode,
-            input.detail,
+            sanitizeLogDetail(input.detail),
           ],
         )
         return
       } catch (fallbackError) {
-        console.error('[system-logs] 写入系统日志失败（已忽略，不影响主流程）:', fallbackError)
+        // 只打印脱敏后的错误描述：驱动异常的 message 里可能带 SQL、参数与内部路径
+        console.error(
+          `[system-logs] 写入系统日志失败（已忽略，不影响主流程）: ${describeError(fallbackError)}`,
+        )
       }
       return
     }
-    console.error('[system-logs] 写入系统日志失败（已忽略，不影响主流程）:', error)
+    console.error(`[system-logs] 写入系统日志失败（已忽略，不影响主流程）: ${describeError(error)}`)
   }
 }
