@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { sign } from 'hono/jwt'
 import { buildAdminUpdatePlan } from '../src/services/admin-user.service'
 import { parseExpiresIn, signAdminToken, verifyAdminToken } from '../src/utils/jwt'
+import { describeError, sanitizeLogDetail } from '../src/utils/log'
 import { dummyVerify, hashPassword, verifyPassword } from '../src/utils/password'
 import { FixedWindowRateLimiter } from '../src/utils/rate-limit'
 import { ERROR_HTTP_STATUS, ErrorCode, failure, success } from '../src/utils/response'
@@ -159,6 +160,78 @@ describe('response', () => {
     expect(ErrorCode.ADMIN_NOT_FOUND).toBe(40401)
     expect(ErrorCode.USERNAME_EXISTS).toBe(40901)
     expect(ErrorCode.EMAIL_EXISTS).toBe(40902)
+  })
+
+  test('静态资源相关错误码与 HTTP 状态码映射', () => {
+    expect(ERROR_HTTP_STATUS[ErrorCode.RESOURCE_NOT_FOUND]).toBe(404)
+    expect(ERROR_HTTP_STATUS[ErrorCode.FILE_TOO_LARGE]).toBe(413)
+    expect(ERROR_HTTP_STATUS[ErrorCode.REQUEST_TOO_LARGE]).toBe(413)
+    expect(ERROR_HTTP_STATUS[ErrorCode.IMAGE_PIXEL_LIMIT_EXCEEDED]).toBe(413)
+    expect(ERROR_HTTP_STATUS[ErrorCode.UNSUPPORTED_IMAGE_FORMAT]).toBe(415)
+    expect(ERROR_HTTP_STATUS[ErrorCode.IMAGE_DECODE_FAILED]).toBe(415)
+    expect(ErrorCode.RESOURCE_NOT_FOUND).toBe(40402)
+    expect(ErrorCode.FILE_TOO_LARGE).toBe(41300)
+    expect(ErrorCode.REQUEST_TOO_LARGE).toBe(41301)
+    expect(ErrorCode.IMAGE_PIXEL_LIMIT_EXCEEDED).toBe(41302)
+    expect(ErrorCode.UNSUPPORTED_IMAGE_FORMAT).toBe(41500)
+    expect(ErrorCode.IMAGE_DECODE_FAILED).toBe(41501)
+  })
+})
+
+describe('log 脱敏', () => {
+  test('驱动异常只输出类型与错误码，不输出 message', () => {
+    const error = Object.assign(new Error("Table 'ict.static_assets' doesn't exist"), {
+      code: 'ER_NO_SUCH_TABLE',
+    })
+    const described = describeError(error)
+    expect(described).toBe('Error[ER_NO_SUCH_TABLE]')
+    expect(described).not.toContain('static_assets')
+  })
+
+  test('普通异常保留 message，但抹掉绝对路径', () => {
+    const described = describeError(new Error('open D:\\upload\\comment\\a.png failed'))
+    expect(described).not.toContain('D:\\upload')
+    expect(described).toContain('<path>')
+  })
+
+  test('日志详情去掉控制字符并截断', () => {
+    const detail = sanitizeLogDetail(`a${String.fromCharCode(10)}b${'x'.repeat(600)}`)
+    expect(detail).not.toContain(String.fromCharCode(10))
+    expect((detail as string).length).toBeLessThanOrEqual(501)
+  })
+
+  test('空详情归一化为 null', () => {
+    expect(sanitizeLogDetail(null)).toBeNull()
+    expect(sanitizeLogDetail('   ')).toBeNull()
+  })
+})
+
+describe('rate-limit consume', () => {
+  test('第 max 次放行，第 max+1 次拒绝', () => {
+    const limiter = new FixedWindowRateLimiter({ windowMs: 60_000, max: 3 })
+    expect(limiter.consume('a').allowed).toBe(true)
+    expect(limiter.consume('a').allowed).toBe(true)
+    expect(limiter.consume('a').allowed).toBe(true)
+    const denied = limiter.consume('a')
+    expect(denied.allowed).toBe(false)
+    expect(denied.remaining).toBe(0)
+    expect(denied.retryAfterSeconds).toBeGreaterThan(0)
+  })
+
+  test('不同 key 相互独立', () => {
+    const limiter = new FixedWindowRateLimiter({ windowMs: 60_000, max: 1 })
+    expect(limiter.consume('a').allowed).toBe(true)
+    expect(limiter.consume('a').allowed).toBe(false)
+    expect(limiter.consume('b').allowed).toBe(true)
+  })
+
+  test('clear 清空全部计数', () => {
+    const limiter = new FixedWindowRateLimiter({ windowMs: 60_000, max: 1 })
+    limiter.consume('a')
+    expect(limiter.size).toBe(1)
+    limiter.clear()
+    expect(limiter.size).toBe(0)
+    expect(limiter.consume('a').allowed).toBe(true)
   })
 })
 

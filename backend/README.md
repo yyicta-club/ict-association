@@ -124,7 +124,6 @@ backend/
 ├── .env                      # 本地配置（已忽略）
 ├── package.json              # dev / start / db:init / seed:admin / typecheck / test
 ├── tsconfig.json             # ESNext + bundler 解析 + strict + bun types
-├── bunfig.toml               # 测试预加载配置（preload = test/setup.ts）
 ├── README.md
 ├── docs/
 │   └── static-files.md       # 静态图片资源接口 · 运维与后端手册
@@ -132,21 +131,10 @@ backend/
 │   ├── init-db.ts            # 读取并执行 src/db/v1.sql（建库建表 + 初始数据）
 │   └── seed-admin.ts         # 初始化管理员：密码哈希后入库，已存在则更新密码
 ├── test/
-│   ├── setup.ts              # 测试预加载：替换数据库与日志写入，绝不连接真实库
-│   ├── helpers/
-│   │   ├── fake-db.ts        # 内存假数据库（static_assets / system_logs 等）
-│   │   ├── http.ts           # 测试用 HTTP 调用器（可注入模拟的连接对端地址）
-│   │   └── images.ts         # 测试用图片与 multipart 请求体构造
-│   ├── app.test.ts           # 接口层集成测试：路由 / 鉴权 / CORS / 404（不依赖数据库）
+│   ├── app.test.ts           # 接口层集成测试：路由 / 鉴权 / CORS / 404（不访问数据库）
 │   ├── utils.test.ts         # 单元测试：密码 / JWT / 限流器 / 响应体 / 入参校验 / 日志脱敏
-│   ├── harness.test.ts       # 测试夹具自检：假库生效、multipart 上传链路可用
 │   ├── image-inspect.test.ts # 图片签名识别 / 完整解码 / 像素上限
-│   ├── static-file-upload.test.ts       # 上传接口：鉴权 / 分类权限 / 字段校验 / 体积上限
-│   ├── static-file-list.test.ts         # 列表接口：鉴权 / 分类与删除态筛选 / 分页 / 参数化查询
-│   ├── static-file-delete-recover.test.ts # 软删除与恢复：幂等 / 404 / 审计日志
-│   ├── static-file-faults.test.ts       # 故障补偿：落库失败清理文件 / 待核查事件
-│   ├── static-file-rate-limit.test.ts   # 上传限流：共享配额 / 失败计数 / 伪造转发头
-│   └── trusted-proxy.test.ts            # 可信代理：IP 归一化 / CIDR 匹配 / 代理链解析
+│   └── trusted-proxy.test.ts # 可信代理：IP 归一化 / CIDR 匹配 / 代理链解析
 └── src/
     ├── index.ts              # 入口：env 启动校验 → Bun.serve(:8787) → 启动日志
     ├── app.ts                # 组装 Hono：CORS → 日志 → 路由挂载 → /health → 404 → 全局错误
@@ -573,7 +561,7 @@ pnpm test            # -> bun test
 | 命令 | 结果 |
 | --- | --- |
 | `pnpm run typecheck` | **通过**，无类型错误（`tsc --noEmit` 退出码 0，无输出） |
-| `pnpm test` | **通过**，**248 个用例全部通过，0 失败**（`Ran 248 tests across 10 files`，823 次 `expect()` 断言） |
+| `pnpm test` | **通过**，**150 个用例全部通过，0 失败**（`Ran 150 tests across 4 files`，417 次 `expect()` 断言） |
 
 `pnpm test` 的用例分布：
 
@@ -581,23 +569,15 @@ pnpm test            # -> bun test
 | --- | --- | --- |
 | `test/trusted-proxy.test.ts` | 62 | IP 归一化（去前导零 / 端口 / zone id / IPv4-mapped 折回）、IPv4 与 IPv6 解析、CIDR 匹配、`TRUSTED_PROXIES` 列表解析、可信代理链自右向左剥离、伪造转发头无效 |
 | `test/image-inspect.test.ts` | 34 | 文件头签名识别（PNG / JPEG / WebP / GIF）、格式伪装与非图片识别、规范扩展名与 MIME、完整解码校验、累计像素上限（含动画帧数计费） |
-| `test/static-file-upload.test.ts` | 30 | 上传鉴权、游客 / 管理员分类权限、multipart 字段校验、体积上限（5 MiB / 6 MiB / 伪造 `Content-Length`）、格式识别与动画保留、响应内容与审计日志 |
-| `test/static-file-list.test.ts` | 17 | 列表鉴权、默认 `deleted_at IS NULL`、分类与删除态筛选、分页与 `pageSize` 截断、参数化查询（SQL 注入输入被拒） |
-| `test/static-file-delete-recover.test.ts` | 14 | 软删除与恢复的幂等、404 `40402`、`id` 校验、只改删除状态、审计日志 |
-| `test/static-file-rate-limit.test.ts` | 10 | 固定窗口配额、两个入口共享配额、失败请求消耗额度、限流在鉴权之前、429 不落库、伪造转发头无法绕过 |
-| `test/static-file-faults.test.ts` | 4 | 落库明确失败时补偿删除文件、落库结果无法确认时保留文件并记录待核查事件、磁盘写入失败不产生数据库记录 |
 | `test/utils.test.ts` | 43 | 密码哈希往返与随机盐、JWT 往返 / 篡改 / 过期 / 错密钥拒绝、有效期解析、限流器、响应体与错误码映射（含静态资源错误码）、入参校验、日志脱敏 |
-| `test/app.test.ts` | 32 | `/health` 降级逻辑、登录参数校验与 500 兜底、`adminAuth` 中间件、未知路由 404、`/tourist` 占位接口、CORS 白名单、管理员账户创建与资料修改 |
-| `test/harness.test.ts` | 2 | 测试夹具自检：假数据库生效、multipart 上传链路可用 |
-| **合计** | **248** | |
-
-测试通过 `bunfig.toml` 预加载 `test/setup.ts`，先替换数据库访问与日志写入再加载被测模块，**整个测试过程不连接真实数据库**。
-
+| `test/app.test.ts` | 11 | `adminAuth` 中间件（无 token / 伪造 token / 合法 token）、未知路由 404、`/tourist` 占位接口、CORS 白名单、`/admin/user/*` 的鉴权拦截 |
+| **合计** | **150** | |
 ### 7.2 已知缺项
 
 - **本仓库目前没有 lint 脚本。** `backend/package.json` 的 `scripts` 只有 `dev` / `start` / `db:init` / `seed:admin` / `typecheck` / `test`，没有 ESLint / Biome 等 lint 配置与命令。
 - `pnpm run typecheck` 执行的是 `tsc --noEmit`，属于**类型检查**，**不能冒充 lint**；本节不把它当作 lint 结果。
 - 后续如需补上 lint，需要单独引入工具与配置（并把 `lint` 加进 `scripts` 与 CI），本次交付未包含。
+- **上传 / 列表 / 软删除 / 恢复 / 限流 / 故障补偿等接口目前没有自动化测试**（随内存假库一并移除），需要回归时只能手工验证或重新引入测试库方案。
 
 待在本机安装 MySQL 8 后复跑（脚本与接口均已就绪）：
 
@@ -610,5 +590,4 @@ bun run db:init && bun run seed:admin -- --password='YourPassw0rd!'
 - `src/db/migrations/2026-11-26_static_assets_deleted_at.sql` 在生产库上的执行与验证 SQL
 - 真实反向代理（Nginx）下的 `X-Forwarded-For` 透传与 `TRUSTED_PROXIES` 匹配
 - 真实磁盘上的上传目录权限、并发上传与磁盘写满场景
-
-上传与删除 / 恢复接口的**业务逻辑已由上述 248 个用例覆盖**（用内存假库与临时目录替代真实 MySQL 与真实磁盘），数据库迁移与反向代理仍需在具备真实环境时复跑。
+- **上传 / 列表 / 软删除 / 恢复 / 限流 / 故障补偿各接口的业务链路**（自动化测试已随内存假库移除，需手工或另行引入测试库验证）
