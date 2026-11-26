@@ -31,13 +31,14 @@ CREATE TABLE static_assets (
                                mime_type   VARCHAR(100) NULL COMMENT 'MIME, 如 image/png',
                                category    VARCHAR(50)  NOT NULL DEFAULT 'general' COMMENT '用途: article(文章配图, 仅管理员上传) / gallery(图库, 仅管理员上传) / comment(评论配图, 管理员与游客均可上传); 保留历史分类值',
                                size_bytes  INT UNSIGNED NULL COMMENT '文件大小(字节)',
-                               md5         CHAR(32)     NULL COMMENT '内容指纹, 用于重复上传去重',
+                               md5         CHAR(32)     NULL COMMENT '内容指纹(MD5), 同分类下字节完全一致即视为重复; 历史记录为 NULL 不参与去重',
                                uploader_id BIGINT UNSIGNED NULL COMMENT '上传者 admins.id, 游客上传为 NULL',
                                created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
                                deleted_at  DATETIME     NULL DEFAULT NULL COMMENT '软删除时间; NULL=未删除, 非 NULL=已删除(仅影响管理状态, 不撤销已有访问地址)',
                                PRIMARY KEY (id),
                                UNIQUE KEY uk_path (path),
                                KEY idx_category (category),
+                               KEY idx_category_md5 (category, md5),
                                KEY idx_deleted_id (deleted_at, id),
                                CONSTRAINT fk_assets_uploader FOREIGN KEY (uploader_id) REFERENCES admins (id) ON DELETE SET NULL
 ) ENGINE=InnoDB COMMENT='静态资源表';

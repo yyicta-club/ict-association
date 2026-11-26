@@ -31,6 +31,8 @@ export const ErrorCode = {
   USERNAME_EXISTS: 40901,
   /** 邮箱已被占用 */
   EMAIL_EXISTS: 40902,
+  /** 资源指纹冲突或已存文件校验失败 */
+  RESOURCE_CONFLICT: 40903,
   /** 单个上传文件超过大小上限 */
   FILE_TOO_LARGE: 41300,
   /** 上传请求体超过大小上限 */
@@ -43,6 +45,8 @@ export const ErrorCode = {
   IMAGE_DECODE_FAILED: 41501,
   /** 尝试次数过多 */
   TOO_MANY_ATTEMPTS: 42900,
+  /** 去重锁等待超时 */
+  DEDUP_LOCK_TIMEOUT: 50301,
   /** 服务器内部错误 */
   INTERNAL_ERROR: 50000,
 } as const
@@ -62,12 +66,14 @@ export const ERROR_HTTP_STATUS: Record<number, ContentfulStatusCode> = {
   [ErrorCode.ADMIN_CONFLICT]: 409,
   [ErrorCode.USERNAME_EXISTS]: 409,
   [ErrorCode.EMAIL_EXISTS]: 409,
+  [ErrorCode.RESOURCE_CONFLICT]: 409,
   [ErrorCode.FILE_TOO_LARGE]: 413,
   [ErrorCode.REQUEST_TOO_LARGE]: 413,
   [ErrorCode.IMAGE_PIXEL_LIMIT_EXCEEDED]: 413,
   [ErrorCode.UNSUPPORTED_IMAGE_FORMAT]: 415,
   [ErrorCode.IMAGE_DECODE_FAILED]: 415,
   [ErrorCode.TOO_MANY_ATTEMPTS]: 429,
+  [ErrorCode.DEDUP_LOCK_TIMEOUT]: 503,
   [ErrorCode.INTERNAL_ERROR]: 500,
 }
 

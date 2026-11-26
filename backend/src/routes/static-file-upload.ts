@@ -142,7 +142,7 @@ export function createUploadHandler(options: UploadHandlerOptions) {
 
     // 5. 业务处理
     try {
-      const asset = await uploadStaticAsset({
+      const { asset, outcome } = await uploadStaticAsset({
         category,
         originalFileName: filePart.filename,
         data: filePart.data,
@@ -150,12 +150,23 @@ export function createUploadHandler(options: UploadHandlerOptions) {
         ip,
         requestPath,
       })
+
+      // 三种结果对应不同的响应文案与审计日志；指纹本身不返回给客户端
+      const outcomeLabel =
+        outcome === 'created' ? '新建' : outcome === 'reused' ? '复用' : '恢复'
+      const message =
+        outcome === 'created'
+          ? '上传成功'
+          : outcome === 'reused'
+            ? '文件已存在，已复用原资源'
+            : '文件已存在，已恢复原资源'
+
       await writeLog(
         'INFO',
         200,
-        `上传成功: 资源 ID=${asset.id}, 分类=${asset.category}, 类型=${asset.mimeType}, 大小=${asset.sizeBytes} 字节`,
+        `上传成功（${outcomeLabel}）: 资源 ID=${asset.id}, 分类=${asset.category}, 类型=${asset.mimeType}, 大小=${asset.sizeBytes} 字节`,
       )
-      return c.json(success(asset, '上传成功'), 200)
+      return c.json(success(asset, message), 200)
     } catch (error) {
       if (error instanceof AppError) {
         await writeLog('WARN', error.status, `上传失败: ${error.message}`)

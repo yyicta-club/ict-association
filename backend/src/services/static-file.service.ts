@@ -3,17 +3,25 @@
  *
  * 安全约定：
  * - 分类白名单在后端强制执行；文章 / 图库仅管理员可上传，评论允许管理员与游客上传
+ * - 指纹去重：同分类 + 文件字节完全一致视为重复，复用原资源（必要时恢复软删除记录）
+ * - 去重用 MySQL 命名锁串行化同一把指纹，并发上传同一图片只会生成一份文件与一条记录
  * - 先写文件、后写数据库：数据库明确失败时删除本次产生的文件；
  *   落库结果无法确认时保留文件并记录待核查事件，避免误删已经关联成功的文件
  * - 查询参数全部参数化；筛选与排序片段只由服务端固定枚举生成
  * - 响应只提供资源元数据，绝不暴露磁盘绝对路径
  */
 import { env } from '../config/env'
-import { execute, query } from '../db'
-import type { SqlValue } from '../db'
+import { acquireNamedLock, execute, query, releaseNamedLock } from '../db'
+import type { DbConnection, SqlValue } from '../db'
 import { inspectImage } from '../utils/image-inspect'
 import { AppError, ErrorCode } from '../utils/response'
 import { recordSystemLog } from './system-log.service'
+import {
+  DEDUP_LOCK_TIMEOUT_SECONDS,
+  buildDedupLockName,
+  computeFingerprint,
+  inspectStoredFile,
+} from './static-file-dedup.service'
 import { removeStoredFile, sanitizeOriginalFileName, writeStoredFile } from './static-file-storage.service'
 
 /** 允许上传的分类（全部） */
@@ -129,13 +137,40 @@ export function isUncertainCommitError(error: unknown): boolean {
 }
 
 /** 按 id 查询资源行 */
-async function findAssetRow(id: number): Promise<StaticAssetRow | null> {
+async function findAssetRow(
+  id: number,
+  connection?: DbConnection,
+): Promise<StaticAssetRow | null> {
   const rows = await query<StaticAssetRow[]>(
     `SELECT id, filename, path, url, mime_type, category, size_bytes, md5, uploader_id, created_at, deleted_at
        FROM static_assets
       WHERE id = ?
       LIMIT 1`,
     [id],
+    connection,
+  )
+  return rows[0] ?? null
+}
+
+/**
+ * 按「分类 + 指纹」查询已有资源。
+ *
+ * 历史数据 md5 为 NULL，不会命中（SQL 里 NULL 不等于任何值），
+ * 因此去重只对本次功能上线后保存指纹的资源生效，不需要回填历史数据。
+ */
+async function findAssetByFingerprint(
+  category: UploadCategory,
+  fingerprint: string,
+  connection?: DbConnection,
+): Promise<StaticAssetRow | null> {
+  const rows = await query<StaticAssetRow[]>(
+    `SELECT id, filename, path, url, mime_type, category, size_bytes, md5, uploader_id, created_at, deleted_at
+       FROM static_assets
+      WHERE category = ?
+        AND md5 = ?
+      LIMIT 1`,
+    [category, fingerprint],
+    connection,
   )
   return rows[0] ?? null
 }
@@ -155,8 +190,28 @@ export type UploadStaticAssetInput = {
   requestPath: string
 }
 
+/** 上传结果的三种形态（内部使用，不暴露指纹） */
+export type UploadOutcome =
+  /** 首次上传：新建了文件与数据库记录 */
+  | 'created'
+  /** 指纹命中：复用了已有资源，未产生新文件与新记录 */
+  | 'reused'
+  /** 指纹命中且原记录处于软删除：已清空 deleted_at 恢复原资源 */
+  | 'restored'
+
+/** 上传结果 */
+export type UploadStaticAssetResult = {
+  asset: StaticAssetMetadata
+  outcome: UploadOutcome
+}
+
 /**
- * 上传一张图片：校验 -> 落盘 -> 落库。
+ * 上传一张图片：校验 -> 指纹 -> 加锁 -> 查重 -> 复用/恢复/新建。
+ *
+ * 去重规则：同分类 + 文件字节完全一致视为重复。
+ * - 命中且原记录未删除 -> 复用，返回原资源（不新增文件与记录，不改首次上传的文件名与上传者）
+ * - 命中且原记录已软删除 -> 清空 deleted_at 后返回原资源
+ * - 命中但磁盘文件核对不通过 -> 返回资源冲突错误，不覆盖文件、不恢复记录，并记录核查日志
  *
  * 落库失败时：
  * - 明确失败（语法错误、外键冲突等）-> 删除本次写入的文件
@@ -164,7 +219,7 @@ export type UploadStaticAssetInput = {
  */
 export async function uploadStaticAsset(
   input: UploadStaticAssetInput,
-): Promise<StaticAssetMetadata> {
+): Promise<UploadStaticAssetResult> {
   if (input.data.byteLength === 0) {
     throw new AppError(ErrorCode.BAD_REQUEST, '上传文件不能为空')
   }
@@ -183,7 +238,47 @@ export async function uploadStaticAsset(
     maxTotalPixels: env.staticFile.maxTotalPixels,
   })
 
-  // 2. 落盘（路径固定为 <分类>/<UUID>.<扩展名>）
+  // 2. 计算指纹（对实际保存的原始字节）
+  const fingerprint = computeFingerprint(input.data)
+
+  // 3. 获取并发锁：同一「分类 + 指纹」串行化
+  const lockName = buildDedupLockName({
+    database: env.db.database,
+    category: input.category,
+    fingerprint,
+  })
+  const lock = await acquireNamedLock(lockName, DEDUP_LOCK_TIMEOUT_SECONDS)
+  if (!lock) {
+    throw new AppError(
+      ErrorCode.DEDUP_LOCK_TIMEOUT,
+      '同一资源正在处理中，请稍后重试',
+    )
+  }
+
+  // 4. 锁与业务 SQL 共用同一条连接；所有退出路径都会释放锁并归还连接
+  try {
+    return await uploadWithinLock(input, fingerprint, inspection, lock.connection)
+  } finally {
+    await releaseNamedLock(lock)
+  }
+}
+
+/**
+ * 持锁执行上传：拿到锁后重新查重，再决定复用 / 恢复 / 新建。
+ */
+async function uploadWithinLock(
+  input: UploadStaticAssetInput,
+  fingerprint: string,
+  inspection: { extension: string; mimeType: string },
+  connection: DbConnection,
+): Promise<UploadStaticAssetResult> {
+  // 1. 拿到锁后重新查重（等待锁期间可能已有别人写入）
+  const existing = await findAssetByFingerprint(input.category, fingerprint, connection)
+  if (existing) {
+    return reuseExistingAsset(input, existing, fingerprint, connection)
+  }
+
+  // 2. 未命中：落盘（路径固定为 <分类>/<UUID>.<扩展名>）
   const stored = await writeStoredFile({
     rootPath: env.staticFile.rootPath,
     category: input.category,
@@ -191,36 +286,41 @@ export async function uploadStaticAsset(
     data: input.data,
   })
 
-  // 3. 落库
+  // 3. 落库（同一连接，指纹一并写入）
   const filename = sanitizeOriginalFileName(input.originalFileName)
   try {
     const result = await execute(
       `INSERT INTO static_assets (filename, path, url, mime_type, category, size_bytes, md5, uploader_id)
-       VALUES (?, ?, NULL, ?, ?, ?, NULL, ?)`,
+       VALUES (?, ?, NULL, ?, ?, ?, ?, ?)`,
       [
         filename,
         stored.relativePath,
         inspection.mimeType,
         input.category,
         stored.size,
+        fingerprint,
         input.uploaderId,
       ],
+      connection,
     )
 
-    const row = await findAssetRow(result.insertId).catch(() => null)
-    if (row) return toMetadata(row)
+    const row = await findAssetRow(result.insertId, connection).catch(() => null)
+    if (row) return { asset: toMetadata(row), outcome: 'created' }
 
     return {
-      id: result.insertId,
-      filename,
-      path: stored.relativePath,
-      url: null,
-      mimeType: inspection.mimeType,
-      category: input.category,
-      sizeBytes: stored.size,
-      uploaderId: input.uploaderId,
-      createdAt: new Date().toISOString(),
-      deletedAt: null,
+      asset: {
+        id: result.insertId,
+        filename,
+        path: stored.relativePath,
+        url: null,
+        mimeType: inspection.mimeType,
+        category: input.category,
+        sizeBytes: stored.size,
+        uploaderId: input.uploaderId,
+        createdAt: new Date().toISOString(),
+        deletedAt: null,
+      },
+      outcome: 'created',
     }
   } catch (error) {
     if (isUncertainCommitError(error)) {
@@ -242,6 +342,61 @@ export async function uploadStaticAsset(
     await removeStoredFile(stored.absolutePath).catch(() => false)
     throw error
   }
+}
+
+/**
+ * 复用命中指纹的已有资源。
+ *
+ * - 先核对磁盘上的真实文件（大小 + 字节），避免 MD5 碰撞被误判成重复
+ * - 核对不通过时**不覆盖文件、不恢复记录**，只记录核查日志并返回资源冲突错误
+ * - 原记录处于软删除时清空 deleted_at 后返回原资源
+ * - 首次上传的文件名与上传者保持不变（游客复用管理员的资源时 uploaderId 仍是管理员）
+ */
+async function reuseExistingAsset(
+  input: UploadStaticAssetInput,
+  existing: StaticAssetRow,
+  fingerprint: string,
+  connection: DbConnection,
+): Promise<UploadStaticAssetResult> {
+  const check = await inspectStoredFile({
+    rootPath: env.staticFile.rootPath,
+    relativePath: existing.path,
+    expectedSize: Number(existing.size_bytes ?? 0),
+    expectedFingerprint: fingerprint,
+  })
+
+  if (check.state !== 'ok') {
+    await recordSystemLog({
+      level: 'ERROR',
+      operation: '静态资源指纹校验失败',
+      module: 'static-file',
+      operatorId: input.uploaderId,
+      ip: input.ip,
+      requestPath: input.requestPath,
+      statusCode: 409,
+      detail: `指纹命中但文件核对未通过（${check.reason}），未覆盖文件、未恢复记录，需人工核查；资源 ID=${existing.id}, 分类=${input.category}`,
+    })
+    throw new AppError(
+      ErrorCode.RESOURCE_CONFLICT,
+      '资源指纹校验失败，请稍后重试或联系管理员核查',
+    )
+  }
+
+  // 命中软删除记录：清空 deleted_at 并返回原资源
+  if (existing.deleted_at !== null) {
+    await execute(
+      'UPDATE static_assets SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL',
+      [existing.id],
+      connection,
+    )
+    const restored = await findAssetRow(existing.id, connection)
+    return {
+      asset: toMetadata(restored ?? { ...existing, deleted_at: null }),
+      outcome: 'restored',
+    }
+  }
+
+  return { asset: toMetadata(existing), outcome: 'reused' }
 }
 
 /** 列表查询输入 */
