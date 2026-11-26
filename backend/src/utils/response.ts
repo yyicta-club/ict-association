@@ -25,6 +25,8 @@ export const ErrorCode = {
   ADMIN_NOT_FOUND: 40401,
   /** 静态资源不存在 */
   RESOURCE_NOT_FOUND: 40402,
+  /** 文章不存在（或已被软删除） */
+  ARTICLE_NOT_FOUND: 40403,
   /** 账户名或邮箱冲突（唯一索引冲突兜底） */
   ADMIN_CONFLICT: 40900,
   /** 账户名已存在 */
@@ -33,6 +35,8 @@ export const ErrorCode = {
   EMAIL_EXISTS: 40902,
   /** 资源指纹冲突或已存文件校验失败 */
   RESOURCE_CONFLICT: 40903,
+  /** 文章 slug 已被占用 */
+  ARTICLE_SLUG_CONFLICT: 40904,
   /** 单个上传文件超过大小上限 */
   FILE_TOO_LARGE: 41300,
   /** 上传请求体超过大小上限 */
@@ -63,10 +67,12 @@ export const ERROR_HTTP_STATUS: Record<number, ContentfulStatusCode> = {
   [ErrorCode.ACCOUNT_DISABLED]: 403,
   [ErrorCode.ADMIN_NOT_FOUND]: 404,
   [ErrorCode.RESOURCE_NOT_FOUND]: 404,
+  [ErrorCode.ARTICLE_NOT_FOUND]: 404,
   [ErrorCode.ADMIN_CONFLICT]: 409,
   [ErrorCode.USERNAME_EXISTS]: 409,
   [ErrorCode.EMAIL_EXISTS]: 409,
   [ErrorCode.RESOURCE_CONFLICT]: 409,
+  [ErrorCode.ARTICLE_SLUG_CONFLICT]: 409,
   [ErrorCode.FILE_TOO_LARGE]: 413,
   [ErrorCode.REQUEST_TOO_LARGE]: 413,
   [ErrorCode.IMAGE_PIXEL_LIMIT_EXCEEDED]: 413,

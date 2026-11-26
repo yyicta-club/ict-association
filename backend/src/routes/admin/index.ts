@@ -6,6 +6,7 @@ import { Hono } from 'hono'
 import { adminAuth } from '../../middlewares/auth'
 import type { HonoEnv } from '../../types'
 import { success } from '../../utils/response'
+import { adminArticleRoutes } from './article'
 import { adminAuthRoutes } from './auth'
 import { adminStaticFileRoutes } from './static-file'
 import { adminUserRoutes } from './user'
@@ -20,6 +21,9 @@ adminRoutes.route('/user', adminUserRoutes)
 
 // 静态资源管理（上传 / 列表 / 软删除 / 恢复）
 adminRoutes.route('/static-files', adminStaticFileRoutes)
+
+// 文章管理（创建 / 部分修改 / 软删除）
+adminRoutes.route('/article', adminArticleRoutes)
 
 // 受保护接口示例：校验 token 是否有效
 adminRoutes.get('/me', adminAuth, (c) => {

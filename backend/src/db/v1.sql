@@ -71,10 +71,12 @@ CREATE TABLE articles (
                           published_at   DATETIME     NULL COMMENT '发布时间, 决定列表排序',
                           created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
                           updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                          deleted_at     DATETIME     NULL DEFAULT NULL COMMENT '软删除时间; NULL=未删除, 非 NULL=已删除(仅标记状态, 保留文章/评论/标签数据)',
                           PRIMARY KEY (id),
                           UNIQUE KEY uk_slug (slug),
                           KEY idx_status_published (status, published_at),
                           KEY idx_category (category_id),
+                          KEY idx_deleted_id (deleted_at, id),
                           CONSTRAINT fk_articles_cover    FOREIGN KEY (cover_asset_id) REFERENCES static_assets (id) ON DELETE SET NULL,
                           CONSTRAINT fk_articles_category FOREIGN KEY (category_id)   REFERENCES categories (id)  ON DELETE SET NULL
 ) ENGINE=InnoDB COMMENT='文章表';
