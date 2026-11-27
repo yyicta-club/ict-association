@@ -7,7 +7,8 @@
 - 统一响应体：`{ code, message, data }`，同时返回 HTTP 状态码
 - MySQL 未启动时服务照常启动，由 `GET /health` 暴露数据库状态
 - 静态资源：图片上传（管理员 / 游客入口）、列表、软删除与恢复，详见 [`docs/static-files.md`](docs/static-files.md)
-- 文章管理：创建、部分修改、软删除（正文为纯 Markdown），详见 [`docs/articles.md`](docs/articles.md)
+- 文章：创建 / 修改 / 软删除 + 游客端与后台的列表、详情、批量软删除（正文为纯 Markdown），详见 [`docs/articles.md`](docs/articles.md)
+- 未开发接口清单：已完成与待开发接口的对照盘点，详见 [`docs/unimplemented-endpoints.md`](docs/unimplemented-endpoints.md)
 
 ---
 
@@ -127,23 +128,29 @@ backend/
 ├── tsconfig.json             # ESNext + bundler 解析 + strict + bun types
 ├── README.md
 ├── docs/
-│   ├── openapi-static-files.yaml # 静态资源接口 OpenAPI 规格（可导入 Apifox）
-│   └── openapi-articles.yaml      # 文章接口 OpenAPI 规格（可导入 Apifox）
+│   ├── openapi-article-read.yaml # 本次新增 5 个接口的 OpenAPI 规格（可导入 Apifox）
+│   ├── articles.md             # 文章接口手册（契约 / 处理流程 / 错误场景 / 故障排查）
+│   ├── static-files.md         # 静态资源接口手册
+│   └── unimplemented-endpoints.md # 未开发接口清单（已完成 / 待开发对照盘点）
 ├── scripts/
 │   ├── init-db.ts            # 读取并执行 src/db/v1.sql（建库建表 + 初始数据）
 │   └── seed-admin.ts         # 初始化管理员：密码哈希后入库，已存在则更新密码
 ├── test/
 │   ├── app.test.ts           # 接口层集成测试：路由 / 鉴权 / CORS / 404（不访问数据库）
 │   ├── article.test.ts       # 文章入参校验与更新计划单测（纯函数，不访问数据库）
+│   ├── article-query.test.ts # 文章查询 / 批量删除的校验与服务层测试（假数据库句柄）
+│   ├── article-routes.test.ts# 文章查询 / 批量删除的接口层测试（假数据库句柄）
 │   ├── utils.test.ts         # 单元测试：密码 / JWT / 限流器 / 响应体 / 入参校验 / 日志脱敏
 │   ├── image-inspect.test.ts # 图片签名识别 / 完整解码 / 像素上限
-│   └── trusted-proxy.test.ts # 可信代理：IP 归一化 / CIDR 匹配 / 代理链解析
+│   ├── trusted-proxy.test.ts # 可信代理：IP 归一化 / CIDR 匹配 / 代理链解析
+│   └── support/
+│       └── fake-store.ts     # 假数据库句柄：让测试完全不接触真实数据库
 └── src/
     ├── index.ts              # 入口：env 启动校验 → Bun.serve(:8787) → 启动日志
     ├── app.ts                # 组装 Hono：CORS → 日志 → 路由挂载 → /health → 404 → 全局错误
     ├── config/env.ts         # 环境变量集中读取、默认值与启动校验
     ├── db/
-    │   ├── index.ts          # mysql2 连接池 + query<T>() / execute() + 命名锁（GET_LOCK）
+    │   ├── index.ts          # mysql2 连接池 + query<T>() / execute() + 命名锁（GET_LOCK）+ DbStore
     │   ├── v1.sql            # 表结构（含 static_assets.deleted_at、articles.deleted_at）
     ├── middlewares/
     │   ├── logger.ts         # 请求日志（method/path/status/耗时）
@@ -154,16 +161,17 @@ backend/
     │   │   ├── index.ts      # /admin 路由组
     │   │   ├── auth.ts       # POST /admin/login
     │   │   ├── user.ts       # POST /admin/user/create、/admin/user/settings
-    │   │   ├── article.ts    # POST /admin/article/create、/setting、/delete
+    │   │   ├── article.ts    # /admin/article/* 六个接口（列表 / 详情 / 创建 / 修改 / 删除 / 批量删除）
     │   │   └── static-file.ts # 上传 / 列表 / 软删除 / 恢复
     │   ├── tourist/
-    │   │   ├── index.ts      # /tourist 路由组（占位，后续新闻/评论在此扩展）
+    │   │   ├── index.ts      # /tourist 路由组
+    │   │   ├── article.ts    # GET /tourist/articles、/tourist/articles/:slug（详情自增浏览量）
     │   │   └── static-file.ts # POST /tourist/static-files/upload（公开，仅评论配图）
     │   └── static-file-upload.ts # 上传处理逻辑（管理员 / 游客入口共用同一段实现）
     ├── services/
     │   ├── admin-auth.service.ts  # 登录业务逻辑 + 登录日志落库
     │   ├── admin-user.service.ts  # 管理员账户创建与资料修改
-    │   ├── article.service.ts     # 文章创建 / 部分修改 / 软删除 + 关联资源校验
+    │   ├── article.service.ts     # 文章创建 / 修改 / 软删除 / 批量软删除 / 列表 / 详情 + 关联资源校验
     │   ├── static-file.service.ts # 分类白名单、落库、列表、软删除与恢复
     │   ├── static-file-dedup.service.ts # 指纹计算、锁名生成、已存文件核对
     │   ├── static-file-storage.service.ts # 路径规划、独占写入、失败清理
@@ -178,7 +186,7 @@ backend/
     │   ├── image-inspect.ts  # 图片签名识别 + 完整解码校验 + 像素上限
     │   ├── multipart.ts      # 限长读取请求体（不信任 Content-Length）+ multipart 解析
     │   ├── query-params.ts   # 查询参数校验（正整数 / 固定枚举）
-    │   ├── article-validation.ts # 文章入参校验（标题/slug/正文安全/状态/布尔/ID/未知字段）
+    │   ├── article-validation.ts # 文章入参校验（标题/slug/正文安全/状态/布尔/ID/未知字段/查询参数/批量删除）
     │   ├── log.ts            # 日志脱敏：describeError() / sanitizeLogDetail()
     │   └── validation.ts     # 用户名 / 密码 / 邮箱等入参校验
     └── types/index.ts        # AdminRow / AdminPublic / JwtAdminPayload / AppVariables
@@ -187,6 +195,8 @@ backend/
 ---
 
 ## 4. API
+
+> 本节只描述**已实现**的接口。尚未开发的接口（评论、分类、标签、轮播图、统计、站点设置等）见 [`docs/unimplemented-endpoints.md`](docs/unimplemented-endpoints.md)。
 
 ### 4.1 通用响应格式
 
@@ -298,7 +308,7 @@ Authorization: Bearer <token>
 
 ### 4.5 `GET /tourist/ping`（占位）
 
-游客端公开接口占位，后续新闻列表、文章详情、评论等都在 `/tourist` 路由组扩展。
+游客端公开接口占位。文章列表与详情见 4.12 / 4.13，评论、分类、轮播图等仍在 `/tourist` 路由组扩展。
 
 ### 4.6 静态资源接口总览
 
@@ -526,15 +536,20 @@ Content-Type: application/json
 
 > **幂等**：重复删除返回成功（`deletedAt` 保持第一次的删除时间）；重复恢复同样返回成功（`deletedAt` 保持 `null`）。
 
-### 4.11 后台文章接口总览
+### 4.11 文章接口总览
 
-三个后台文章接口，统一复用既有 Hono 应用、统一响应体 `{ code, message, data }`、参数化 SQL 与 `system_logs` 审计日志。完整契约见 [`docs/articles.md`](docs/articles.md) 与 [`docs/openapi-articles.yaml`](docs/openapi-articles.yaml)。
+八个文章接口，统一复用既有 Hono 应用、统一响应体 `{ code, message, data }`、参数化 SQL 与 `system_logs` 审计日志。完整契约见 [`docs/articles.md`](docs/articles.md)；本次新增 5 个接口的 OpenAPI 规格见 [`docs/openapi-article-read.yaml`](docs/openapi-article-read.yaml)（可导入 Apifox）。
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
+| `GET` | `/tourist/articles` | 公开 | 已发布文章列表（分类筛选 + 分页） |
+| `GET` | `/tourist/articles/:slug` | 公开 | 文章详情（**同时递增浏览量**） |
+| `GET` | `/admin/article/list` | 管理员 | 分页查询文章（关键词 / 分类 / 状态筛选） |
+| `GET` | `/admin/article/detail?id=123` | 管理员 | 按 id 返回**含正文**的完整文章（不计数） |
 | `POST` | `/admin/article/create` | 管理员 | 创建文章（必填 `title` / `slug` / `content`） |
 | `POST` | `/admin/article/setting` | 管理员 | 部分修改文章（必填 `id` + 至少一个可修改字段） |
 | `POST` | `/admin/article/delete` | 管理员 | 软删除文章（只写 `deleted_at`） |
+| `POST` | `/admin/article/batch-delete` | 管理员 | 批量软删除文章（1..100 篇） |
 
 **字段规则**
 
@@ -549,11 +564,12 @@ Content-Type: application/json
 | `status` | integer | 可选；`0` 草稿 / `1` 已发布 / `2` 已下架；**只接受数字类型** |
 | `is_top` | boolean | 可选；**只接受布尔值** `true` / `false` |
 
-- **未知字段一律拒绝**：请求体只接受上表字段（`setting` 另加 `id`），多余的键返回 400 `40000`「不支持的字段: ...」。
-- **服务端托管字段**：`published_at`（发布时间）与 `view_count`（浏览量）不接受客户端写入；`published_at` 在状态首次变为「已发布」时由服务端补写 `NOW()`，`view_count` 这三个接口永不写。
+- **未知字段一律拒绝**：请求体只接受上表字段（`setting` 另加 `id`，`batch-delete` 只接受 `ids`），多余的键返回 400 `40000`「不支持的字段: ...」。
+- **未知参数 / 重复参数一律拒绝**：读接口只接受白名单里的查询参数，同名参数出现两次同样返回 400 `40000`。
+- **服务端托管字段**：`published_at`（发布时间）与 `view_count`（浏览量）不接受客户端写入；`published_at` 在状态首次变为「已发布」时由服务端补写 `NOW()`，`view_count` 只有游客端详情会自增。
 - **只更新提供的字段**：`setting` 只写请求里出现且与当前值不同的字段，未提供的字段原样保留；`summary` / `cover_asset_id` / `category_id` 传 `null` 表示清空。
 
-**文章元数据**（三个接口的 `data` 结构一致，**不回显正文**）
+**文章元数据**（写接口与列表的 `data` 结构一致，**不回显正文**）
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -573,6 +589,16 @@ Content-Type: application/json
 
 > `setting` 的 `data` 额外带 `changedFields: string[]`（本次真正发生变更的字段名；无变化时为空数组）。
 
+**列表项 / 详情附带的关联字段**
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `category` | `{ id, name, slug } \| null` | 精简分类信息；关联缺失时为 `null` |
+| `cover` | `{ id, path, url } \| null` | 精简封面信息；关联缺失时为 `null`；`url` 未接 CDN 时是 `null`（不拼接未经配置的访问域名） |
+| `content` | `string` | **只有详情**才有：原始 Markdown 正文 |
+
+> 封面资源被软删除**不撤销**已有文章引用；列表 SQL **不读取正文**。
+
 **错误场景**
 
 | 场景 | HTTP | code | message |
@@ -580,15 +606,102 @@ Content-Type: application/json
 | 未携带 / 非法 token | 401 | 40100 | 未登录或登录已过期 |
 | 请求体不是合法 JSON / 不是 JSON 对象 | 400 | 40000 | 请求体必须是合法的 JSON / 请求体必须是 JSON 对象 |
 | 出现未知字段 | 400 | 40000 | 不支持的字段: `<字段名>` |
+| 出现未知参数 / 重复参数 | 400 | 40000 | 不支持的参数: `<参数名>` / 参数 `<参数名>` 不能重复 |
 | 字段类型 / 长度 / slug 格式 / 正文安全校验失败 | 400 | 40000 | 见 [`docs/articles.md` 4.2](docs/articles.md) 的错误场景表 |
 | `setting` 只有 `id` 没有可修改字段 | 400 | 40000 | 至少需要提供一个要修改的字段 |
+| 分页参数非法或超界（`page` 1..1000000、`pageSize` 1..100） | 400 | 40000 | page 必须是整数 / page 必须在 1 到 1000000 之间 |
+| `status` 查询参数不是 0 / 1 / 2 | 400 | 40000 | status 只能是 0（草稿）/ 1（已发布）/ 2（已下架） |
+| `keyword` 超过 200 字符 | 400 | 40000 | 关键词长度不能超过 200 位 |
+| 批量删除的 `ids` 不是数组 / 数量不在 1..100 / 含非法 id | 400 | 40000 | ids 必须是数组 / ids 的数量必须在 1 到 100 之间 / id 必须是正整数 |
 | 分类不存在 | 400 | 40000 | 分类不存在 |
 | 封面资源不存在 / 已删除 / 不是文章配图 | 400 | 40000 | 封面资源不存在 / 封面资源已删除 / 封面资源必须是文章配图 |
+| 批量删除请求体超过 8 KiB | 413 | 41301 | 请求体不能超过 8192 字节 |
 | slug 已被占用（含已软删除的文章） | 409 | 40904 | slug 已被占用 |
-| 文章不存在或已被软删除 | 404 | 40403 | 文章不存在 |
+| 文章不存在或已被软删除（后台详情 / 游客详情不可见） | 404 | 40403 | 文章不存在 |
 | 数据库不可用等异常 | 500 | 50000 | 服务器内部错误 |
 
 > **软删除**：只写 `articles.deleted_at`，文章行、评论（`comments`）与标签关联（`article_tags`）全部保留，不做级联清理；删除**不幂等**（重复删除返回 404 `40403`）；已软删除的文章仍占用唯一索引 `uk_slug`，其 slug 不能被新文章复用；本次**不提供恢复接口**。
+
+### 4.12 列表接口（游客端 / 后台）
+
+**请求**
+
+```http
+GET /tourist/articles?category_id=1&page=1&pageSize=20
+GET /admin/article/list?keyword=公告&category_id=1&status=1&page=1&pageSize=20
+Authorization: Bearer <token>          # 仅后台列表需要
+```
+
+| 参数 | 游客端 | 后台 | 说明 |
+| --- | --- | --- | --- |
+| `keyword` | ✗ | ✓ | 去首尾空白；空值视为不筛选；≤ 200 字符；匹配标题或摘要；`%` / `_` 按普通字符处理 |
+| `category_id` | ✓ | ✓ | 分类 id（正安全整数），**精确匹配**，不自动包含子分类 |
+| `status` | ✗ | ✓ | `0` / `1` / `2`；省略时查询草稿 / 已发布 / 已下架 |
+| `page` | ✓ | ✓ | 默认 `1`，范围 `1..1000000` |
+| `pageSize` | ✓ | ✓ | 默认 `20`，范围 `1..100` |
+
+**成功响应** `200`
+
+```json
+{
+  "code": 0,
+  "message": "查询成功",
+  "data": {
+    "items": [ { "id": 37, "title": "…", "slug": "…", "…": "…",
+                 "category": { "id": 1, "name": "协会公告", "slug": "announcement" },
+                 "cover": { "id": 12, "path": "article/2f1c....png", "url": null } } ],
+    "total": 128,
+    "page": 1,
+    "pageSize": 20
+  }
+}
+```
+
+- 游客端**只返回** `status = 1` 且未软删除的文章（可见范围由服务端固定，客户端无法覆盖）。
+- 后台端**始终排除**软删除文章。
+- 排序固定：游客端 `is_top DESC, published_at DESC, id DESC`；后台 `is_top DESC, created_at DESC, id DESC`。
+- 超出末页时 `items` 是**空数组**，`total` 仍是符合条件的总条数。
+
+### 4.13 文章详情（游客端 / 后台）
+
+```http
+GET /tourist/articles/annual-meeting-2026
+GET /admin/article/detail?id=37
+Authorization: Bearer <token>          # 仅后台详情需要
+```
+
+- 两个详情都返回**含正文 `content`** 的完整内容，并附带 `category` / `cover`。
+- **后台详情不增加浏览量**；`id` 缺失或非法 → 400 `40000`。
+- **游客详情会自增浏览量**：短事务内 `SELECT ... FOR UPDATE` 锁定文章 → 数据库自增 → 回读 → 提交；
+  按每次有效 `GET` 计数（**不按用户或 IP 去重**），`HEAD` / `OPTIONS` **不计数**，
+  计数**不修改** `updated_at`，达到 `INT UNSIGNED` 上限（4294967295）时保持上限。
+- 游客详情响应带 `Cache-Control: no-store`。
+- 不存在 / 草稿 / 已下架 / 已删除的游客详情，以及不存在 / 已删除的后台详情，统一返回 404 `40403`。
+
+### 4.14 `POST /admin/article/batch-delete`
+
+批量软删除文章。
+
+```http
+POST /admin/article/batch-delete
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{ "ids": [1, 2, 3] }
+```
+
+- `ids` 原始长度 **1..100**，每项必须是**数字类型**的正安全整数；**先完整校验，再按首次出现顺序去重**。
+- 请求体按**实际读取的字节数**限制 **8 KiB**（不信任 `Content-Length`），超限 → 413 `41301`。
+- 同一事务内**按 id 升序**锁定有效文章并统一写 `deleted_at`；评论、标签关联与图片引用全部保留。
+- 不存在或已被软删除的 id 记入 `skippedIds`（**不报错**）；**全部跳过仍返回 200**；数据库失败整批回滚。
+
+```json
+{
+  "code": 0,
+  "message": "删除成功",
+  "data": { "deletedIds": [1, 3], "skippedIds": [2], "deletedCount": 2 }
+}
+```
 
 ---
 
@@ -622,15 +735,21 @@ Content-Type: application/json
 
 ### 5.2 文章相关
 
-- **鉴权**：三个文章接口整组挂 `adminAuth`，未登录一律 401 `40100`，不进入业务逻辑。
+- **鉴权**：六个后台文章接口整组挂 `adminAuth`，未登录一律 401 `40100`，不进入业务逻辑；游客端两个接口是公开的。
 - **先校验后落库**：所有入参校验都是纯函数（`src/utils/article-validation.ts`），**任何校验失败都在触碰数据库之前返回 400**；`setting` / `delete` 先读当前文章（`deleted_at IS NULL`）再决定写什么。
 - **字段白名单**：请求体只接受约定字段，`published_at` / `view_count` / `deleted_at` 等服务端托管字段出现即拒绝，避免越权写入。
+- **参数白名单**：读接口只接受约定的查询参数，**未知参数**与**重复参数**一律 400 `40000`；游客端不接受 `status` / `keyword`——可见范围由服务端固定，客户端无法覆盖。
 - **严格类型**：`status` 只接受数字 `0` / `1` / `2`，`is_top` 只接受布尔 `true` / `false`，所有 id 必须是正安全整数（数字类型）；字符串 `"1"`、`0` / `1` 形式的布尔值一律拒绝。
 - **正文只接受纯 Markdown**：拒绝原始 HTML（标签 / 注释 / DOCTYPE）与不安全的 URL scheme（`javascript` / `vbscript` / `data` / `file`）；扫描前会解码 HTML 实体、去掉控制字符并转小写，挡住实体编码与控制字符混淆；scheme 前要求不是字母 / 数字（`profile:` 不会误判成 `file:`）、冒号后必须紧贴非空白字符（`Data: 说明` 不会误判）。正文上限 100 KB（UTF-8 编码后）。
 - **slug 规范**：只允许小写字母、数字与单个连字符分隔；唯一性由数据库唯一索引 `uk_slug` 兜底，服务层先查重给出友好提示、再用 `ER_DUP_ENTRY` 兜底并发冲突。
 - **关联资源先查后写**：分类必须存在；封面必须是**存在、未软删除、`category = 'article'`** 的图片资源。
 - **软删除只标记**：只写 `articles.deleted_at`，不物理删除文章，不级联清理评论与标签关联；文章不存在或已软删除统一返回 404 `40403`。
-- **审计日志不记正文**：`system_logs`（`module = 'article'`）只记录文章 id、状态、变更字段名等元信息，**绝不记录正文、标题、摘要或完整请求体**；日志写入失败不影响主流程。
+- **公开数据隔离**：游客端只返回 `status = 1` 且未软删除的文章；后台端始终排除软删除文章。筛选与排序片段只由服务端固定枚举拼装，值一律参数化。
+- **关键词按普通字符处理**：`%` / `_` / `!` 都经 `ESCAPE '!'` 转义，搜索 `100%` 不会匹配到任意内容。
+- **列表不读正文**：列表 SQL 的 `SELECT` 列里没有 `content`，避免大字段回显；详情才回显原始 Markdown。
+- **浏览量只由服务端维护**：只有游客端详情的有效 `GET` 会自增；`HEAD` / `OPTIONS`、后台详情、不可见文章都不计数；自增在短事务内用 `SELECT ... FOR UPDATE` 锁定文章后由数据库执行，**不丢计数**、**不修改 `updated_at`**、达到 `INT UNSIGNED` 上限时保持上限；详情响应固定 `Cache-Control: no-store`。
+- **批量删除受限**：原始数组 1..100 项、每项必须是数字类型的正安全整数；请求体按实际读取字节数限制 8 KiB（不信任 `Content-Length`）；同一事务内按 id 升序锁定，统一写 `deleted_at`，失败整批回滚。
+- **审计日志不记正文**：`system_logs`（`module = 'article'`）只记录文章 id、状态、变更字段名、数量等元信息，**绝不记录正文、标题、摘要、关键词或完整请求体**；批量删除只记操作者、数量与必要 id；日志写入失败不影响主流程。
 
 ### 5.3 上线前还需
 
@@ -646,7 +765,7 @@ bun run start       # 生产启动
 bun run db:init     # 建库建表 + 初始数据
 bun run seed:admin  # 创建/重置初始管理员
 bun run typecheck   # tsc --noEmit 类型检查
-bun test            # 单元 + 集成测试（密码 / JWT / 限流 / 响应体 / 上传 / 可信代理）
+bun test            # 单元 + 集成测试
 ```
 
 `package.json` 里的脚本也可用 pnpm 调用（`pnpm run typecheck` / `pnpm test`），二者等价。
@@ -670,7 +789,7 @@ pnpm test            # -> bun test
 | 命令 | 结果 |
 | --- | --- |
 | `pnpm run typecheck` | **通过**，无类型错误（`tsc --noEmit` 退出码 0，无输出） |
-| `pnpm test` | **通过**，**198 个用例全部通过，0 失败**（`Ran 198 tests across 5 files`，594 次 `expect()` 断言） |
+| `pnpm test` | **通过**，**268 个用例全部通过，0 失败**（`Ran 268 tests across 7 files`，869 次 `expect()` 断言） |
 
 `pnpm test` 的用例分布：
 
@@ -678,14 +797,30 @@ pnpm test            # -> bun test
 | --- | --- | --- |
 | `test/trusted-proxy.test.ts` | 62 | IP 归一化（去前导零 / 端口 / zone id / IPv4-mapped 折回）、IPv4 与 IPv6 解析、CIDR 匹配、`TRUSTED_PROXIES` 列表解析、可信代理链自右向左剥离、伪造转发头无效 |
 | `test/article.test.ts` | 42 | 文章入参校验（标题 / slug / 摘要长度与格式、状态枚举、布尔值、ID、未知字段）、正文 Markdown 安全边界（空值 / 超长 / 原始 HTML / 不安全 scheme / 混淆绕过 / 合法 Markdown）、创建 / 修改 / 删除请求解析、`buildArticleUpdatePlan` 只更新变化字段、文章错误码映射 |
+| `test/article-query.test.ts` | 47 | 列表 / 详情 / 批量删除的**查询参数校验**（分页边界、未知与重复参数、分类与状态组合、关键词长度与空白）、批量删除请求体校验（数组类型、1..100 数量、每项为数字类型、去重顺序）、服务层筛选构建（权限条件固定、关键词转义）、列表不读正文、排序固定、关联字段为空、浏览量自增与事务回滚、批量删除的升序锁定与跳过逻辑 |
 | `test/image-inspect.test.ts` | 34 | 文件头签名识别（PNG / JPEG / WebP / GIF）、格式伪装与非图片识别、规范扩展名与 MIME、完整解码校验、累计像素上限（含动画帧数计费） |
 | `test/utils.test.ts` | 43 | 密码哈希往返与随机盐、JWT 往返 / 篡改 / 过期 / 错密钥拒绝、有效期解析、限流器、响应体与错误码映射（含静态资源错误码）、入参校验、日志脱敏 |
 | `test/app.test.ts` | 17 | `adminAuth` 中间件（无 token / 伪造 token / 合法 token）、未知路由 404、`/tourist` 占位接口、CORS 白名单、`/admin/user/*` 与 `/admin/article/*` 的鉴权拦截 |
-| **合计** | **198** | |
+| `test/article-routes.test.ts` | 23 | 游客端列表 / 详情的公开性、公开数据隔离、详情含正文与浏览量自增、`Cache-Control: no-store`、**HEAD 不计数**、404 统一错误码；后台列表 / 详情的鉴权与参数校验；批量删除的返回结构、请求体上限 413、审计只记数量与 id |
+| **合计** | **268** | |
 
-### 7.2 文章接口的数据库实测
+> 上述用例**全部不连接任何真实数据库**：服务层与接口层通过注入的假句柄
+> （`src/db/index.ts` 的 `DbStore`）验证 SQL 与返回映射，
+> 审计日志同样走注入的句柄，不会往 `system_logs` 写真实数据。
 
-文章接口依赖 MySQL，本次在**开发库**（`backend/.env` 指向的 `ict_association`）上做了完整链路实测：
+### 7.2 已知缺项
+
+- **本仓库目前没有 lint 脚本。** `backend/package.json` 的 `scripts` 只有 `dev` / `start` / `db:init` / `seed:admin` / `typecheck` / `test`，没有 ESLint / Biome 等 lint 配置与命令。
+- `pnpm run typecheck` 执行的是 `tsc --noEmit`，属于**类型检查**，**不能冒充 lint**；本节不把它当作 lint 结果。
+- 后续如需补上 lint，需要单独引入工具与配置（并把 `lint` 加进 `scripts` 与 CI），本次交付未包含。
+- **上传 / 列表 / 软删除 / 恢复 / 限流 / 故障补偿等接口目前没有自动化测试**（随内存假库一并移除），需要回归时只能手工验证或重新引入测试库方案。
+- 文章**写**接口的数据库分支（slug 冲突、分类 / 封面存在性、软删除落库）目前**只有下面 7.3 的手工实测**，没有沉淀成自动化用例。
+- 文章**读**接口与批量删除的自动化用例只覆盖**纯逻辑与 SQL 形状**（注入假句柄，不连库）；
+  依赖真实数据库的行为——**并发浏览量计数、重叠批量删除、关联数据保留**——目前**未执行**，需要回归时只能手工验证或另建独立测试库方案。
+
+### 7.3 文章写接口的数据库实测（历史记录）
+
+文章写接口依赖 MySQL，此前在**开发库**（`backend/.env` 指向的 `ict_association`）上做过完整链路实测：
 
 ```sh
 # 1) 执行增量迁移（幂等；已执行过一次，重复执行只打印 [skip]）
@@ -712,14 +847,8 @@ mysql -h <host> -P <port> -u <user> -p <DB_NAME> < backend/src/db/migrations/202
 | 审计日志 | `system_logs` 有 `module='article'` 记录，且**不含正文 / 标题内容** |
 
 > 实测产生的测试数据（文章、评论、标签关联、静态资源临时行）在脚本结束时已全部清理；`system_logs` 中的审计记录按审计惯例保留。
-
-### 7.3 已知缺项
-
-- **本仓库目前没有 lint 脚本。** `backend/package.json` 的 `scripts` 只有 `dev` / `start` / `db:init` / `seed:admin` / `typecheck` / `test`，没有 ESLint / Biome 等 lint 配置与命令。
-- `pnpm run typecheck` 执行的是 `tsc --noEmit`，属于**类型检查**，**不能冒充 lint**；本节不把它当作 lint 结果。
-- 后续如需补上 lint，需要单独引入工具与配置（并把 `lint` 加进 `scripts` 与 CI），本次交付未包含。
-- **上传 / 列表 / 软删除 / 恢复 / 限流 / 故障补偿等接口目前没有自动化测试**（随内存假库一并移除），需要回归时只能手工验证或重新引入测试库方案。
-- 文章接口的数据库分支（slug 冲突、分类 / 封面存在性、软删除落库）目前**只有上面 7.2 的手工实测**，没有沉淀成自动化用例；`pnpm test` 保持"零数据库读写"的约定。
+> **本次新增的读接口与批量删除接口没有在业务库上实测**（避免污染业务数据）；
+> 其依赖真实数据库的行为（并发计数、重叠批量删除、关联数据保留）目前**未执行**，见 7.2。
 
 待在本机安装 MySQL 8 后复跑（脚本与接口均已就绪）：
 

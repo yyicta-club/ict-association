@@ -5,7 +5,8 @@
  * - 日志写入失败绝不影响主流程，异常只打印到控制台
  * - 绝不记录密码、密码哈希与 token
  */
-import { execute } from '../db'
+import { defaultDbStore } from '../db'
+import type { DbStore } from '../db'
 import { describeError, sanitizeLogDetail } from '../utils/log'
 
 export type SystemLogInput = {
@@ -41,10 +42,16 @@ function isOperatorForeignKeyError(error: unknown): boolean {
  *
  * 写入失败只记录到控制台，不向上抛出，避免审计日志拖垮业务接口。
  * 外键冲突时降级为"操作者置空"再写一次，尽量保住审计记录。
+ *
+ * @param input 日志内容
+ * @param store 数据库句柄（默认直连连接池；测试可注入假实现以隔离真实数据库）
  */
-export async function recordSystemLog(input: SystemLogInput): Promise<void> {
+export async function recordSystemLog(
+  input: SystemLogInput,
+  store: DbStore = defaultDbStore,
+): Promise<void> {
   try {
-    await execute(
+    await store.execute(
       `INSERT INTO system_logs (level, operation, module, operator_id, ip, request_path, status_code, detail)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -62,7 +69,7 @@ export async function recordSystemLog(input: SystemLogInput): Promise<void> {
     if (input.operatorId !== null && isOperatorForeignKeyError(error)) {
       // 操作者已不存在：置空 operator_id 再写一次，保留审计记录
       try {
-        await execute(
+        await store.execute(
           `INSERT INTO system_logs (level, operation, module, operator_id, ip, request_path, status_code, detail)
            VALUES (?, ?, ?, NULL, ?, ?, ?, ?)`,
           [

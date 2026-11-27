@@ -32,6 +32,29 @@ export type SqlValue = string | number | bigint | boolean | Date | Buffer | Uint
 /** 专用连接（需要跨多条语句保持同一会话时使用） */
 export type DbConnection = PoolConnection
 
+/**
+ * 数据库句柄（依赖注入接缝）。
+ *
+ * 默认实现直连全局连接池；服务层允许传入自定义句柄，
+ * 从而在**不连接任何真实数据库**的前提下用假实现验证业务逻辑。
+ */
+export type DbStore = {
+  /** 执行查询并返回行数据 */
+  query<T = RowDataPacket[]>(
+    sql: string,
+    params?: SqlValue[],
+    connection?: DbConnection,
+  ): Promise<T>
+  /** 执行写操作，返回受影响行数与自增主键 */
+  execute(
+    sql: string,
+    params?: SqlValue[],
+    connection?: DbConnection,
+  ): Promise<{ affectedRows: number; insertId: number }>
+  /** 借出一条专用连接（调用方负责 release / destroy） */
+  getConnection(): Promise<DbConnection>
+}
+
 /** 执行查询并返回行数据 */
 export async function query<T = RowDataPacket[]>(
   sql: string,
@@ -75,6 +98,17 @@ export async function closePool(): Promise<void> {
  */
 export async function getConnection(): Promise<DbConnection> {
   return pool.getConnection()
+}
+
+/**
+ * 默认数据库句柄：直连全局连接池。
+ *
+ * 服务层把它作为默认参数，测试可注入假实现，从而完全隔离真实数据库。
+ */
+export const defaultDbStore: DbStore = {
+  query,
+  execute,
+  getConnection,
 }
 
 /** 命名锁句柄 */

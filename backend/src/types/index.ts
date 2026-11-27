@@ -1,6 +1,7 @@
 /**
  * 全局共享类型定义。
  */
+import type { DbStore } from '../db'
 
 /** admins 表行（password_hash 仅在服务端内部使用，禁止回传前端） */
 export type AdminRow = {
@@ -54,6 +55,13 @@ export type AppVariables = {
 export type ServerBindings = {
   /** Bun Server 提供的客户端 IP 解析 */
   requestIP?: (request: Request) => { address: string } | null
+  /**
+   * 文章服务使用的数据库句柄。
+   *
+   * 生产环境**不设置**（服务层回落到全局连接池）；
+   * 测试可注入假实现，从而在完全不连接真实数据库的前提下验证接口行为。
+   */
+  articleStore?: DbStore
 }
 
 /** Hono 应用环境类型 */

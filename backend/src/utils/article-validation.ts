@@ -304,6 +304,48 @@ export const UPDATE_ARTICLE_FIELDS = [
 /** 删除接口允许的字段 */
 export const DELETE_ARTICLE_FIELDS = ['id'] as const
 
+/** 批量删除接口允许的字段 */
+export const BATCH_DELETE_ARTICLE_FIELDS = ['ids'] as const
+
+/** 游客文章列表允许的查询参数 */
+export const TOURIST_ARTICLE_LIST_FIELDS = ['category_id', 'page', 'pageSize'] as const
+
+/** 后台文章列表允许的查询参数 */
+export const ADMIN_ARTICLE_LIST_FIELDS = [
+  'keyword',
+  'category_id',
+  'status',
+  'page',
+  'pageSize',
+] as const
+
+/** 后台文章详情允许的查询参数 */
+export const ADMIN_ARTICLE_DETAIL_FIELDS = ['id'] as const
+
+/** 关键词最大长度 */
+export const ARTICLE_KEYWORD_MAX_LENGTH = 200
+
+/** 列表默认页码 */
+export const ARTICLE_PAGE_DEFAULT = 1
+
+/** 列表默认每页条数 */
+export const ARTICLE_PAGE_SIZE_DEFAULT = 20
+
+/** 列表页码上限（避免 OFFSET 溢出） */
+export const ARTICLE_PAGE_MAX = 1_000_000
+
+/** 列表每页条数上限 */
+export const ARTICLE_PAGE_SIZE_MAX = 100
+
+/** 批量删除：原始数组最少项数 */
+export const BATCH_DELETE_MIN_IDS = 1
+
+/** 批量删除：原始数组最多项数（去重前的原始长度） */
+export const BATCH_DELETE_MAX_IDS = 100
+
+/** 批量删除请求体上限（8 KiB，按实际读取到的字节数判断） */
+export const BATCH_DELETE_BODY_MAX_BYTES = 8 * 1024
+
 /**
  * 拒绝未知字段。
  * 请求体只允许出现白名单里的字段，多余字段一律 400。
@@ -347,6 +389,12 @@ export type UpdateArticleRequest = {
   categoryId?: number | null
   status?: ArticleStatus
   isTop?: boolean
+}
+
+/** 批量删除接口的解析结果 */
+export type BatchDeleteArticleRequest = {
+  /** 去重后的文章 id（按首次出现顺序） */
+  ids: number[]
 }
 
 /**
@@ -494,4 +542,282 @@ export function parseDeleteArticleRequest(body: unknown): ValidationResult<{ id:
   if (!id.ok) return id
 
   return { ok: true, value: { id: id.value } }
+}
+
+/**
+ * 解析并校验批量软删除文章的请求体。
+ *
+ * 规则：
+ * - 请求体必须是 JSON 对象，且只允许 `ids` 一个字段
+ * - `ids` 必须是数组，原始长度 1..100（**按原始数组长度判断**，去重前）
+ * - 每一项都必须是**数字类型**的正安全整数（字符串、小数、负数、布尔一律拒绝）
+ * - 先完整校验，再按**首次出现顺序**去重
+ */
+export function parseBatchDeleteArticleRequest(
+  body: unknown,
+): ValidationResult<BatchDeleteArticleRequest> {
+  if (!isJsonObject(body)) {
+    return { ok: false, message: '请求体必须是 JSON 对象' }
+  }
+
+  const unknown = rejectUnknownFields(body, BATCH_DELETE_ARTICLE_FIELDS)
+  if (!unknown.ok) return unknown
+
+  const raw = body.ids
+  if (!Array.isArray(raw)) {
+    return { ok: false, message: 'ids 必须是数组' }
+  }
+
+  if (raw.length < BATCH_DELETE_MIN_IDS || raw.length > BATCH_DELETE_MAX_IDS) {
+    return {
+      ok: false,
+      message: `ids 的数量必须在 ${BATCH_DELETE_MIN_IDS} 到 ${BATCH_DELETE_MAX_IDS} 之间`,
+    }
+  }
+
+  const ids: number[] = []
+  const seen = new Set<number>()
+  for (const item of raw) {
+    const id = validateArticleId(item)
+    if (!id.ok) return id
+    if (seen.has(id.value)) continue
+    seen.add(id.value)
+    ids.push(id.value)
+  }
+
+  return { ok: true, value: { ids } }
+}
+
+/* ============================ 查询参数解析 ============================ */
+
+/** 查询参数条目（保留重复出现的参数） */
+export type QueryEntries = Map<string, string[]>
+
+/**
+ * 解析查询字符串，**保留重复参数**。
+ *
+ * Hono 的 `c.req.query()` 对同名参数只返回第一个值，
+ * 这里自己解析，才能识别"重复查询参数"这类非法输入。
+ */
+export function parseQueryEntries(search: string): QueryEntries {
+  const entries: QueryEntries = new Map()
+  const raw = search.startsWith('?') ? search.slice(1) : search
+  if (raw === '') return entries
+
+  for (const [key, value] of new URLSearchParams(raw).entries()) {
+    const list = entries.get(key)
+    if (list) {
+      list.push(value)
+    } else {
+      entries.set(key, [value])
+    }
+  }
+  return entries
+}
+
+/**
+ * 校验查询参数的结构：未知参数与重复参数一律拒绝。
+ */
+function validateQueryShape(
+  entries: QueryEntries,
+  allowed: readonly string[],
+): ValidationResult<true> {
+  const unknown = [...entries.keys()].filter((key) => !allowed.includes(key))
+  if (unknown.length > 0) {
+    return { ok: false, message: `不支持的参数: ${unknown.join(', ')}` }
+  }
+  for (const [key, values] of entries) {
+    if (values.length > 1) {
+      return { ok: false, message: `参数 ${key} 不能重复` }
+    }
+  }
+  return { ok: true, value: true }
+}
+
+/**
+ * 解析带范围的整数查询参数。
+ *
+ * 只接受十进制整数字符串（`"1"` 合法；`"1.5"` / `"abc"` / `"-1"` / `""` 一律拒绝）。
+ */
+function parseBoundedIntParam(
+  raw: string,
+  name: string,
+  min: number,
+  max: number,
+): ValidationResult<number> {
+  const value = raw.trim()
+  if (!/^\d+$/.test(value)) {
+    return { ok: false, message: `${name} 必须是整数` }
+  }
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    return { ok: false, message: `${name} 必须在 ${min} 到 ${max} 之间` }
+  }
+  return { ok: true, value: parsed }
+}
+
+/** 解析分页参数（缺省 page=1 / pageSize=20，超界一律失败） */
+function parsePagingParams(
+  entries: QueryEntries,
+): ValidationResult<{ page: number; pageSize: number }> {
+  const pageRaw = entries.get('page')?.[0]
+  const pageSizeRaw = entries.get('pageSize')?.[0]
+
+  const page =
+    pageRaw === undefined
+      ? ({ ok: true, value: ARTICLE_PAGE_DEFAULT } as const)
+      : parseBoundedIntParam(pageRaw, 'page', 1, ARTICLE_PAGE_MAX)
+  if (!page.ok) return page
+
+  const pageSize =
+    pageSizeRaw === undefined
+      ? ({ ok: true, value: ARTICLE_PAGE_SIZE_DEFAULT } as const)
+      : parseBoundedIntParam(pageSizeRaw, 'pageSize', 1, ARTICLE_PAGE_SIZE_MAX)
+  if (!pageSize.ok) return pageSize
+
+  return { ok: true, value: { page: page.value, pageSize: pageSize.value } }
+}
+
+/** 解析分类筛选参数（精确匹配，不自动包含子分类） */
+function parseCategoryIdParam(entries: QueryEntries): ValidationResult<number | null> {
+  const raw = entries.get('category_id')?.[0]
+  if (raw === undefined) return { ok: true, value: null }
+  const parsed = parseBoundedIntParam(raw, 'category_id', 1, Number.MAX_SAFE_INTEGER)
+  if (!parsed.ok) return parsed
+  return { ok: true, value: parsed.value }
+}
+
+/** 解析关键词参数（去首尾空白；空值视为不筛选） */
+function parseKeywordParam(entries: QueryEntries): ValidationResult<string | null> {
+  const raw = entries.get('keyword')?.[0]
+  if (raw === undefined) return { ok: true, value: null }
+  const value = raw.trim()
+  if (value === '') return { ok: true, value: null }
+  if (value.length > ARTICLE_KEYWORD_MAX_LENGTH) {
+    return { ok: false, message: `关键词长度不能超过 ${ARTICLE_KEYWORD_MAX_LENGTH} 位` }
+  }
+  return { ok: true, value }
+}
+
+/** 解析状态筛选参数（只接受 0 / 1 / 2） */
+function parseStatusParam(entries: QueryEntries): ValidationResult<ArticleStatus | null> {
+  const raw = entries.get('status')?.[0]
+  if (raw === undefined) return { ok: true, value: null }
+  const value = raw.trim()
+  if (!/^[0-2]$/.test(value)) {
+    return { ok: false, message: 'status 只能是 0（草稿）/ 1（已发布）/ 2（已下架）' }
+  }
+  return { ok: true, value: Number(value) as ArticleStatus }
+}
+
+/** 游客文章列表的查询参数 */
+export type TouristArticleListQuery = {
+  categoryId: number | null
+  page: number
+  pageSize: number
+}
+
+/**
+ * 解析游客文章列表的查询参数。
+ *
+ * 只接受 `category_id` / `page` / `pageSize`；未知参数、重复参数一律 400。
+ */
+export function parseTouristArticleListQuery(
+  search: string,
+): ValidationResult<TouristArticleListQuery> {
+  const entries = parseQueryEntries(search)
+
+  const shape = validateQueryShape(entries, TOURIST_ARTICLE_LIST_FIELDS)
+  if (!shape.ok) return shape
+
+  const paging = parsePagingParams(entries)
+  if (!paging.ok) return paging
+
+  const categoryId = parseCategoryIdParam(entries)
+  if (!categoryId.ok) return categoryId
+
+  return {
+    ok: true,
+    value: {
+      categoryId: categoryId.value,
+      page: paging.value.page,
+      pageSize: paging.value.pageSize,
+    },
+  }
+}
+
+/** 后台文章列表的查询参数 */
+export type AdminArticleListQuery = {
+  keyword: string | null
+  categoryId: number | null
+  status: ArticleStatus | null
+  page: number
+  pageSize: number
+}
+
+/**
+ * 解析后台文章列表的查询参数。
+ *
+ * 只接受 `keyword` / `category_id` / `status` / `page` / `pageSize`；
+ * 未知参数、重复参数一律 400。
+ */
+export function parseAdminArticleListQuery(
+  search: string,
+): ValidationResult<AdminArticleListQuery> {
+  const entries = parseQueryEntries(search)
+
+  const shape = validateQueryShape(entries, ADMIN_ARTICLE_LIST_FIELDS)
+  if (!shape.ok) return shape
+
+  const paging = parsePagingParams(entries)
+  if (!paging.ok) return paging
+
+  const keyword = parseKeywordParam(entries)
+  if (!keyword.ok) return keyword
+
+  const categoryId = parseCategoryIdParam(entries)
+  if (!categoryId.ok) return categoryId
+
+  const status = parseStatusParam(entries)
+  if (!status.ok) return status
+
+  return {
+    ok: true,
+    value: {
+      keyword: keyword.value,
+      categoryId: categoryId.value,
+      status: status.value,
+      page: paging.value.page,
+      pageSize: paging.value.pageSize,
+    },
+  }
+}
+
+/** 后台文章详情的查询参数 */
+export type AdminArticleDetailQuery = {
+  id: number
+}
+
+/**
+ * 解析后台文章详情的查询参数（`id` 必填，必须是正安全整数）。
+ */
+export function parseArticleDetailQuery(
+  search: string,
+): ValidationResult<AdminArticleDetailQuery> {
+  const entries = parseQueryEntries(search)
+
+  const shape = validateQueryShape(entries, ADMIN_ARTICLE_DETAIL_FIELDS)
+  if (!shape.ok) return shape
+
+  const raw = entries.get('id')?.[0]
+  if (raw === undefined) {
+    return { ok: false, message: 'id 必须是正整数' }
+  }
+
+  const parsed = parseBoundedIntParam(raw, 'id', 1, Number.MAX_SAFE_INTEGER)
+  if (!parsed.ok) {
+    return { ok: false, message: 'id 必须是正整数' }
+  }
+
+  return { ok: true, value: { id: parsed.value } }
 }
